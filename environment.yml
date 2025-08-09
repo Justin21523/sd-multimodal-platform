@@ -1,45 +1,56 @@
+# environment.yml - Dependency Management Strategy
+
 name: sd-platform
 channels:
-  - nvidia
-  - pytorch
-  - conda-forge
-  - defaults
+  - pytorch # Official PyTorch channel for optimized builds
+  - nvidia # NVIDIA CUDA toolkit and drivers
+  - conda-forge # Community-maintained packages
+  - defaults # Anaconda default channel
 dependencies:
+  # core Python Runtime
   - python=3.10
-  # PyTorch (穩定＋廣泛相容)
-  - pytorch=2.3.*
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.1 # 由 nvidia channel 提供；取代 cudatoolkit
+  # PyTorch (stable version compatible with CUDA 12.1))
+  - pytorch=2.3.* # # Latest stable PyTorch
+  - torchvision # PyTorch computer vision library
+  - torchaudio # PyTorch audio processing
+  - pytorch-cuda=12.1 # CUDA toolkit integration
   - pip
   - pip:
-      # Core ML
-      - diffusers>=0.29.0
-      - transformers>=4.43.0
-      - accelerate>=0.31.0
-      - xformers==0.0.27.post2 # 與 torch 2.3 + cu121 相容
-      - controlnet-aux>=0.6.0
-      - safetensors>=0.4.3
-      - einops>=0.7.0
-      - huggingface_hub>=0.24.0
+      # Diffusion Models Core
+      - diffusers>=0.29.0 # HuggingFace diffusion pipeline
+      - transformers>=4.43.0 # Language model transformers
+      - accelerate>=0.31.0 # Multi-GPU training acceleration
+      - xformers==0.0.27.post2 # Memory-efficient attention (compatible with torch 2.3 + cu121)
+      - controlnet-aux>=0.6.0 # ControlNet auxiliary functions
+      - safetensors>=0.4.3 # Efficient tensor storage format
+      - einops>=0.7.0 # Flexible tensor operations
+      - huggingface_hub>=0.24.0 # HuggingFace model hub integration
 
       # API & Web
-      - fastapi>=0.111.0
-      - uvicorn[standard]>=0.30.0
-      - gradio>=4.36.0
-      - pydantic>=2.8.0
-      - python-multipart
+      - fastapi>=0.111.0 # High-performance async API
+      - uvicorn[standard]>=0.30.0 # ASGI server with WebSocket support
+      - gradio>=4.36.0 # Web UI for model interaction
+      - pydantic>=2.8.0 # Data validation and settings management
+      - python-multipart # Multipart form data handling
       - aiofiles
 
       # Desktop UI
-      - PyQt6>=6.6.0
-      - PyQt6-tools
+      - PyQt6>=6.6.0  Cross-platform native GUI
+      - PyQt6-tools # PyQt6 development tools
 
-      # Utils
-      - pillow>=10.3.0
-      - opencv-python-headless>=4.10.0.84
-      - numpy>=1.26.4
-      - scipy>=1.13.0
+      # Utils (Image Processing Pipeline)
+      - pillow>=10.3.0 # Image processing library
+      - opencv-python-headless>=4.10.0.84 # OpenCV for image processing
+      - numpy>=1.26.4 # Numerical operations
+      - scipy>=1.13.0 # Scientific computing library
 
-      # Test
-      - pytest>=8.2.0
+      # Development & Testing
+      - pytest>=8.2.0 #  Unit testing framework
+      - black>=23.9.0 # Code formatting
+      - pre-commit>=3.5.0 # Git hooks for quality control
+
+# Key Design Principles:
+# 1. Version Pinning: Ensure reproducible builds across environments
+# 2. Channel Priority: pytorch > nvidia > conda-forge > defaults
+# 3. Mixed Installation: Conda for system deps, pip for ML packages
+# 4. Latest Stable: Balance cutting-edge features with stability
