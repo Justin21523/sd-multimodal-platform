@@ -120,42 +120,50 @@ sd-multimodal-platform/
 ```yaml
 name: sd-platform
 channels:
+  - nvidia
   - pytorch
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
-  - pytorch=2.1.0
+  # PyTorch (穩定＋廣泛相容)
+  - pytorch=2.3.*
   - torchvision
   - torchaudio
-  - cudatoolkit=11.8
+  - pytorch-cuda=12.1 # 由 nvidia channel 提供；取代 cudatoolkit
   - pip
   - pip:
-    # Core ML
-    - diffusers>=0.24.0
-    - transformers>=4.35.0
-    - accelerate>=0.24.0
-    - xformers>=0.0.22
-    - controlnet-aux>=0.4.0
+      # Core ML
+      - diffusers>=0.29.0
+      - transformers>=4.43.0
+      - accelerate>=0.31.0
+      - xformers==0.0.27.post2 # 與 torch 2.3 + cu121 相容
+      - controlnet-aux>=0.6.0
+      - safetensors>=0.4.3
+      - einops>=0.7.0
+      - huggingface_hub>=0.24.0
 
-    # API & Web
-    - fastapi>=0.104.0
-    - uvicorn[standard]>=0.24.0
-    - gradio>=4.8.0
-    - streamlit>=1.28.0
+      # API & Web
+      - fastapi>=0.111.0
+      - uvicorn[standard]>=0.30.0
+      - gradio>=4.36.0
+      - pydantic>=2.8.0
+      - python-multipart
+      - aiofiles
 
-    # Desktop UI
-    - PyQt6>=6.6.0
-    - PyQt6-tools
+      # Desktop UI
+      - PyQt6>=6.6.0
+      - PyQt6-tools
 
-    # Utils
-    - pillow>=10.0.0
-    - opencv-python>=4.8.0
-    - numpy>=1.24.0
-    - pydantic>=2.4.0
-    - python-multipart
-    - aiofiles
-    - pytest
+      # Utils
+      - pillow>=10.3.0
+      - opencv-python-headless>=4.10.0.84
+      - numpy>=1.26.4
+      - scipy>=1.13.0
+
+      # Test
+      - pytest>=8.2.0
+
 ```
 
 ## 🔧 Git 工作流程與分支策略
