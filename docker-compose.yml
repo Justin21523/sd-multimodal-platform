@@ -1,0 +1,130 @@
+# ===================================
+# SD Multi-Modal Platform Docker Compose
+# Phase 1: Development Environment
+# ===================================
+
+version: '3.8'
+
+services:
+
+  # === 主要應用服務 ===
+  sd-platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sd-platform-api
+    ports:
+      - "8000:8000"
+    environment:
+      # 基礎配置
+      - API_PREFIX=/api/v1
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEVICE=cuda
+      - DEBUG_MODE=true
+
+      # 模型配置
+      - PRIMARY_MODEL=sdxl-base
+      - TORCH_DTYPE=float16
+      - USE_ATTENTION_SLICING=true
+      - ENABLE_XFORMERS=true
+
+      # 檔案路徑
+      - OUTPUT_PATH=/app/outputs
+      - LOG_FILE=/app/logs/app.log
+
+      # 效能設定
+      - MAX_WORKERS=1
+      - MAX_BATCH_SIZE=1
+      - REQUEST_TIMEOUT=300
+
+    volumes:
+      # 模型檔案 (持久化)
+      - ./models:/app/models:rw
+      # 輸出檔案 (持久化)
+      - ./outputs:/app/outputs:rw
+      # 日誌檔案
+      - ./logs:/app/logs:rw
+      # 開發模式：程式碼熱重載
+      - ./app:/app/app:ro
+      - ./services:/app/services:ro
+      - ./utils:/app/utils:ro
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    restart: unless-stopped
+
+    # 網路設定
+    networks:
+      - sd-platform-net
+
+  # === 未來服務預留位置 ===
+
+  # Redis (Phase 2: 佇列系統)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: sd-platform-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - sd-platform-net
+  #   restart: unless-stopped
+
+  # Prometheus (Phase 3: 監控)
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: sd-platform-prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - prometheus-data:/prometheus
+  #   networks:
+  #     - sd-platform-net
+  #   restart: unless-stopped
+
+  # Grafana (Phase 3: 監控儀表板)
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: sd-platform-grafana
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - GF_SECURITY_ADMIN_PASSWORD=admin
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #   networks:
+  #     - sd-platform-net
+  #   restart: unless-stopped
+
+# === Networks ===
+networks:
+  sd-platform-net:
+    driver: bridge
+    name: sd-platform-network
+
+# === container volumes ===
+volumes:
+  # Phase 2: Redis, Prometheus, Grafana
+  # redis-data:
+  #   driver: local
+  # prometheus-data:
+  #   driver: local
+  # grafana-data:
+  #   driver: local
+
