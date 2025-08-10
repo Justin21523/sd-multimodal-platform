@@ -116,7 +116,7 @@ class Settings(BaseSettings):
         }
         return dtype_map[self.TORCH_DTYPE]
 
-    def get_model_path(self, model_type: str = None) -> str:
+    def get_model_path(self, model_type: str = "") -> str:
         """Get the model path based on the primary model setting or specified type"""
         if model_type:
             # Check for specific model types
