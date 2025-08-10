@@ -7,7 +7,8 @@ Use Pydantic Settings for type-safe configuration management
 import os
 from pathlib import Path
 from typing import List, Optional, Literal
-from pydantic import BaseSettings, validator
+from pydantic_settings import BaseSettings
+from pydantic import field_validator
 import torch
 
 
@@ -80,14 +81,16 @@ class Settings(BaseSettings):
     DEBUG_MODE: bool = True
     RELOAD_ON_CHANGE: bool = True
 
-    @validator("ALLOWED_ORIGINS", pre=True)
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
     def validate_origins(cls, v):
         """Deal with comma-separated strings for allowed origins"""
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
 
-    @validator("DEVICE")
+    @field_validator("DEVICE", mode="before")
+    @classmethod
     def validate_device(cls, v):
         """Validate the device setting"""
         if v == "cuda" and not torch.cuda.is_available():
@@ -95,7 +98,8 @@ class Settings(BaseSettings):
             return "cpu"
         return v
 
-    @validator("TORCH_DTYPE")
+    @field_validator("TORCH_DTYPE", mode="before")
+    @classmethod
     def validate_torch_dtype(cls, v):
         """Validate the PyTorch data type setting"""
         valid_dtypes = ["float16", "float32", "bfloat16"]
