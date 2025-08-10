@@ -1,4 +1,4 @@
-# app/schemas/responses.py  
+# app/schemas/responses.py
 """
 SD Multi-Modal Platform - API Response Schemas
 This module defines the response schemas for the text-to-image generation API.
@@ -32,12 +32,18 @@ class ImageMetadata(BaseModel):
     scheduler: Optional[str] = Field(default=None, description="Scheduler name")
 
     # Generation statistics
-    generation_time: float = Field(..., description="Time taken for generation (seconds)")
-    timestamp: float = Field(default_factory=time.time, description="Generation timestamp")
+    generation_time: float = Field(
+        ..., description="Time taken for generation (seconds)"
+    )
+    timestamp: float = Field(
+        default_factory=time.time, description="Generation timestamp"
+    )
 
     # Hardware and performance
     device: str = Field(..., description="Device used for generation (CPU/GPU)")
-    vram_used: Optional[str] = Field(default=None, description="VRAM used (if applicable)")
+    vram_used: Optional[str] = Field(
+        default=None, description="VRAM used (if applicable)"
+    )
     peak_memory: Optional[float] = Field(
         default=None, description="Peak memory usage during generation (in GB)"
     )
@@ -48,7 +54,9 @@ class ImageMetadata(BaseModel):
     file_format: str = Field(default="PNG", description="File format (e.g., PNG, JPEG)")
 
     # Platform metadata
-    platform_version: str = Field(default="1.0.0-phase1", description="Platform version")
+    platform_version: str = Field(
+        default="1.0.0-phase1", description="Platform version"
+    )
 
     def to_dict(self) -> dict:
         """Convert metadata to dictionary format for serialization"""
@@ -65,7 +73,9 @@ class GeneratedImage(BaseModel):
     # Image file information
     url: str = Field(..., description="Image URL or path")
     filename: str = Field(..., description="Image filename")
-    local_path: Optional[str] = Field(default=None, description="Local file path (if applicable)")
+    local_path: Optional[str] = Field(
+        default=None, description="Local file path (if applicable)"
+    )
 
     # Image data
     base64_data: Optional[str] = Field(
@@ -95,10 +105,14 @@ class Txt2ImgResponse(BaseModel):
     message: str = Field(
         default="Generation completed successfully", description="Response message"
     )
-    timestamp: float = Field(default_factory=time.time, description="Response timestamp")
+    timestamp: float = Field(
+        default_factory=time.time, description="Response timestamp"
+    )
 
     # Request metadata
-    data: Optional[Dict[str, Any]] = Field(default=None, description="Additional data related to the request")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None, description="Additional data related to the request"
+    )
 
     # Generated images
     images: List[GeneratedImage] = Field(
@@ -110,17 +124,27 @@ class Txt2ImgResponse(BaseModel):
     total_images: int = Field(..., description="Total number of images generated")
 
     # Performance metrics
-    total_time: float = Field(..., description="Total time taken for the generation (seconds)")
-    model_load_time: Optional[float] = Field(default=None, description="Time taken to load the model (if applicable)")
-    generation_time: float = Field(..., description="Time taken for image generation (seconds)")
+    total_time: float = Field(
+        ..., description="Total time taken for the generation (seconds)"
+    )
+    model_load_time: Optional[float] = Field(
+        default=None, description="Time taken to load the model (if applicable)"
+    )
+    generation_time: float = Field(
+        ..., description="Time taken for image generation (seconds)"
+    )
 
     # Model and device information
     model_used: str = Field(..., description="Model used for generation")
     device_used: str = Field(..., description="Device used for generation (CPU/GPU)")
 
     # 錯誤資訊 (成功時為空)
-    error: Optional[str] = Field(default=None, description="Wrong message if generation failed")
-    error_code: Optional[str] = Field(default=None, description="Error code if applicable")
+    error: Optional[str] = Field(
+        default=None, description="Wrong message if generation failed"
+    )
+    error_code: Optional[str] = Field(
+        default=None, description="Error code if applicable"
+    )
 
     @classmethod
     def success_response(
@@ -133,7 +157,7 @@ class Txt2ImgResponse(BaseModel):
         device_used: str,
         model_load_time: Optional[float] = None,
     ) -> "Txt2ImgResponse":
-        """ Constuct a successful response """
+        """Constuct a successful response"""
         return cls(
             success=True,
             message="Generation completed  successfully",
@@ -160,7 +184,7 @@ class Txt2ImgResponse(BaseModel):
         model_used: Optional[str] = None,
         device_used: Optional[str] = None,
     ) -> "Txt2ImgResponse":
-        """ Construct an error response """
+        """Construct an error response"""
         return cls(
             success=False,
             message="Generation failed",
@@ -180,7 +204,9 @@ class HealthCheckResponse(BaseModel):
     """Response schema for health check endpoint"""
 
     status: str = Field(..., description="Service state: healthy/unhealthy/degraded")
-    timestamp: float = Field(default_factory=time.time, description="Health check timestamp")
+    timestamp: float = Field(
+        default_factory=time.time, description="Health check timestamp"
+    )
 
     # Service information
     service_info: Dict[str, Any] = Field(
@@ -188,7 +214,9 @@ class HealthCheckResponse(BaseModel):
     )
 
     # System status
-    system_status: Dict[str, Any] = Field(default_factory=dict, description="System status information")
+    system_status: Dict[str, Any] = Field(
+        default_factory=dict, description="System status information"
+    )
 
     # GPU status
     gpu_status: Optional[Dict[str, Any]] = Field(
@@ -201,11 +229,15 @@ class HealthCheckResponse(BaseModel):
     )
 
     # Checks and diagnostics
-    checks: Dict[str, bool] = Field(default_factory=dict, description="Health checks and diagnostics")
+    checks: Dict[str, bool] = Field(
+        default_factory=dict, description="Health checks and diagnostics"
+    )
 
     # Warnings and recommendations
     warnings: List[str] = Field(default_factory=list, description="Warnings")
-    recommendations: List[str] = Field(default_factory=list, description="Recommendations")
+    recommendations: List[str] = Field(
+        default_factory=list, description="Recommendations"
+    )
 
     def is_healthy(self) -> bool:
         """Check if the service is healthy"""
@@ -224,39 +256,63 @@ class HealthCheckResponse(BaseModel):
 
 class ModelInfo(BaseModel):
     """Model information schema"""
+
     model_id: str = Field(..., description="Model identifier")
     name: str = Field(..., description="Model name")
-    type: str = Field(..., description="Model type (e.g., 'text-to-image', 'image-to-image')")
+    type: str = Field(
+        ..., description="Model type (e.g., 'text-to-image', 'image-to-image')"
+    )
     path: str = Field(..., description="Path to the model file or directory")
 
     # Model status
     loaded: bool = Field(default=False, description="Whether the model is loaded")
-    loading: bool = Field(default=False, description="Whether the model is currently loading")
-    active: bool = Field(default=False, description="Whether the model is currently active")
+    loading: bool = Field(
+        default=False, description="Whether the model is currently loading"
+    )
+    active: bool = Field(
+        default=False, description="Whether the model is currently active"
+    )
 
     # Model metadata
-    memory_usage: Optional[float] = Field(default=None, description="Memory usage (in GB)")
-    load_time: Optional[float] = Field(default=None, description="Time taken to load the model (in seconds)")
+    memory_usage: Optional[float] = Field(
+        default=None, description="Memory usage (in GB)"
+    )
+    load_time: Optional[float] = Field(
+        default=None, description="Time taken to load the model (in seconds)"
+    )
 
     # Model capabilities
-    supports_controlnet: bool = Field(default=False, description="Whether the model supports ControlNet")
-    supports_lora: bool = Field(default=False, description="Whether the model supports LoRA")
-    supports_img2img: bool = Field(default=False, description="Whether the model supports image-to-image generation")
+    supports_controlnet: bool = Field(
+        default=False, description="Whether the model supports ControlNet"
+    )
+    supports_lora: bool = Field(
+        default=False, description="Whether the model supports LoRA"
+    )
+    supports_img2img: bool = Field(
+        default=False,
+        description="Whether the model supports image-to-image generation",
+    )
 
     # Recommended settings
     recommended_resolution: List[int] = Field(
         default_factory=lambda: [1024, 1024], description="Recommended image resolution"
     )
-    recommended_steps: int = Field(default=25, description="Recommended inference steps")
+    recommended_steps: int = Field(
+        default=25, description="Recommended inference steps"
+    )
     recommended_cfg: float = Field(default=7.5, description="Recommended CFG")
 
 
 class ModelListResponse(BaseModel):
     """Response schema for model listing API"""
 
-    success: bool = Field(default=True, description="Whether the request was successful")
+    success: bool = Field(
+        default=True, description="Whether the request was successful"
+    )
     models: List[ModelInfo] = Field(..., description="Working models list")
-    active_model: Optional[str] = Field(default=None, description="Active model ID (if any)")
+    active_model: Optional[str] = Field(
+        default=None, description="Active model ID (if any)"
+    )
     total_models: int = Field(..., description="Total number of models available")
     loaded_models: int = Field(..., description="Number of models currently loaded")
 
@@ -266,7 +322,7 @@ class ModelListResponse(BaseModel):
     )
 
     def get_active_model(self) -> Optional[ModelInfo]:
-        """ Retrieve the currently active model from the list of models."""
+        """Retrieve the currently active model from the list of models."""
         for model in self.models:
             if model.active:
                 return model
@@ -277,17 +333,29 @@ class ModelListResponse(BaseModel):
 class ErrorResponse(BaseModel):
     """Schema for error responses in the API"""
 
-    success: bool = Field(default=False, description="")
-    error: str = Field(..., description="錯誤訊息")
-    error_code: Optional[str] = Field(default=None, description="錯誤代碼")
-    message: Optional[str] = Field(default=None, description="詳細說明")
+    success: bool = Field(
+        default=False, description="Whether the request was successful"
+    )
+    error: str = Field(..., description="Error message")
+    error_code: Optional[str] = Field(
+        default=None, description="Error code (if applicable)"
+    )
+    message: Optional[str] = Field(
+        default=None, description="Additional message or details about the error"
+    )
 
-    # 請求追蹤
-    request_id: Optional[str] = Field(default=None, description="請求 ID")
-    timestamp: float = Field(default_factory=time.time, description="錯誤發生時間")
+    # Request metadata
+    request_id: Optional[str] = Field(
+        default=None, description="Unique identifier for the request"
+    )
+    timestamp: float = Field(
+        default_factory=time.time, description="Error response timestamp"
+    )
 
-    # 除錯資訊 (僅開發模式)
-    debug_info: Optional[Dict[str, Any]] = Field(default=None, description="除錯資訊")
+    # Debug information
+    debug_info: Optional[Dict[str, Any]] = Field(
+        default=None, description="Debug information (if applicable)"
+    )
 
     @classmethod
     def from_exception(
@@ -297,7 +365,7 @@ class ErrorResponse(BaseModel):
         request_id: Optional[str] = None,
         debug_mode: bool = False,
     ) -> "ErrorResponse":
-        """從例外建立錯誤回應"""
+        """Create an ErrorResponse from an exception."""
         response = cls(error=str(exc), error_code=error_code, request_id=request_id)
 
         if debug_mode:
