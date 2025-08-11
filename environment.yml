@@ -1,26 +1,27 @@
-# environment.yml - Dependency Management Strategy
+# env-text2img.yml - Conda base environment (no PyTorch inside)
+# Goal:
+#   1) Keep your original package set and versions as-is.
+#   2) Do NOT install torch/torchvision/torchaudio here.
+#   3) Add only minimal missing essentials (e.g., python-dotenv).
+#   4) Install the PyTorch trio later via requirements.txt (Nightly cu124).
 
-name: sd-platform
+name: sd-multimodal-platform
 channels:
-  - pytorch # Official PyTorch channel for optimized builds
-  - nvidia # NVIDIA CUDA toolkit and drivers
   - conda-forge # Community-maintained packages
   - defaults # Anaconda default channel
+
 dependencies:
   # core Python Runtime
   - python=3.10
-  # PyTorch (stable version compatible with CUDA 12.1))
-  - pytorch=2.3.* # # Latest stable PyTorch
-  - torchvision # PyTorch computer vision library
-  - torchaudio # PyTorch audio processing
-  - pytorch-cuda=12.1 # CUDA toolkit integration
   - pip
+  - setuptools
+  - wheel
   - pip:
       # Diffusion Models Core
       - diffusers>=0.29.0 # HuggingFace diffusion pipeline
       - transformers>=4.43.0 # Language model transformers
       - accelerate>=0.31.0 # Multi-GPU training acceleration
-      - xformers==0.0.27.post2 # Memory-efficient attention (compatible with torch 2.3 + cu121)
+      - xformers==0.0.27.post2 # Memory-efficient attention (was paired with torch 2.3 + cu121)
       - controlnet-aux>=0.6.0 # ControlNet auxiliary functions
       - safetensors>=0.4.3 # Efficient tensor storage format
       - einops>=0.7.0 # Flexible tensor operations
@@ -35,7 +36,7 @@ dependencies:
       - aiofiles
 
       # Desktop UI
-      - PyQt6>=6.6.0  Cross-platform native GUI
+      - PyQt6>=6.6.0 # Cross-platform native GUI
       - PyQt6-tools # PyQt6 development tools
 
       # Utils (Image Processing Pipeline)
@@ -45,12 +46,12 @@ dependencies:
       - scipy>=1.13.0 # Scientific computing library
 
       # Development & Testing
-      - pytest>=8.2.0 #  Unit testing framework
+      - pytest>=8.2.0 # Unit testing framework
       - black>=23.9.0 # Code formatting
-      - pre-commit>=3.5.0 # Git hooks for quality control
+      - pre-commit>s=3.5.0 # Git hooks for quality control
 
-# Key Design Principles:
-# 1. Version Pinning: Ensure reproducible builds across environments
-# 2. Channel Priority: pytorch > nvidia > conda-forge > defaults
-# 3. Mixed Installation: Conda for system deps, pip for ML packages
-# 4. Latest Stable: Balance cutting-edge features with stability
+      # ---- Minimal additional essential (new) ----
+      - python-dotenv==1.1.1 # Load env variables from .env (added)
+# Notes:
+# - PyTorch trio (torch/torchvision/torchaudio) is intentionally excluded here.
+# - Install them via `pip install -r requirements.txt` after activating this env.
