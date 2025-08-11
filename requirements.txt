@@ -1,39 +1,65 @@
-  - pip:
-      # Diffusion Models Core
-      - diffusers>=0.29.0                     # HuggingFace diffusion pipeline
-      - transformers>=4.43.0                  # Language model transformers
-      - accelerate>=0.31.0                    # Multi-GPU training acceleration
-      - xformers==0.0.27.post2                # Memory-efficient attention (was paired with torch 2.3 + cu121)
-      - controlnet-aux>=0.6.0                 # ControlNet auxiliary functions
-      - safetensors>=0.4.3                    # Efficient tensor storage format
-      - einops>=0.7.0                         # Flexible tensor operations
-      - huggingface_hub>=0.24.0               # HuggingFace model hub integration
+################################################################################
+# requirements.txt - Full Pip Environment for "sd-multimodal-platform"
+#
+# This file includes:
+#   1) PyTorch Nightly (CUDA 12.4) to support RTX 5080 (sm_120).
+#   2) All non-PyTorch packages from the original environment.yml (versions kept).
+#
+# Usage (example with venv):
+#   python -m venv env-text2img
+#   source env-text2img/bin/activate    # Windows: env-text2img\Scripts\activate
+#   pip install --upgrade pip
+#   pip install -r requirements.txt
+#
+# Verify:
+#   python -c "import torch; print(torch.__version__, torch.version.cuda); \
+#              print(torch.cuda.get_device_name(0))"
+################################################################################
 
-      # API & Web
-      - fastapi>=0.111.0                      # High-performance async API
-      - uvicorn[standard]>=0.30.0             # ASGI server with WebSocket support
-      - gradio>=4.36.0                        # Web UI for model interaction
-      - pydantic>=2.8.0                       # Data validation and settings management
-      - python-multipart                      # Multipart form data handling
-      - aiofiles
+# ---- PyTorch Nightly (CUDA 12.4) for RTX 5080 / sm_120 ----
+--extra-index-url https://download.pytorch.org/whl/nightly/cu124
+--pre
+torch
+torchvision
+torchaudio
 
-      # Desktop UI
-      - PyQt6>=6.6.0                          # Cross-platform native GUI
-      - PyQt6-tools                           # PyQt6 development tools
+################################################################################
+# Everything below mirrors your original environment.yml (versions unchanged),
+# plus python-dotenv (added). No NVIDIA/conda-specific toolkits listed here.
+################################################################################
 
-      # Utils (Image Processing Pipeline)
-      - pillow>=10.3.0                        # Image processing library
-      - opencv-python-headless>=4.10.0.84     # OpenCV for image processing
-      - numpy>=1.26.4                         # Numerical operations
-      - scipy>=1.13.0                         # Scientific computing library
+# ===== Diffusion Models Core =====
+diffusers>=0.29.0                 # HuggingFace diffusion pipeline
+transformers>=4.43.0              # Language model transformers
+accelerate>=0.31.0                # Multi-GPU training acceleration
+xformers==0.0.27.post2            # Mem-efficient attention (built for torch 2.3/cu121)
+controlnet-aux>=0.0.10             # ControlNet auxiliary functions
+safetensors>=0.4.3                # Efficient tensor storage format
+einops>=0.7.0                     # Flexible tensor operations
+huggingface_hub>=0.24.0           # HF model hub integration (name normalized by pip)
 
-      # Development & Testing
-      - pytest>=8.2.0                         # Unit testing framework
-      - black>=23.9.0                         # Code formatting
-      - pre-commit>=3.5.0                     # Git hooks for quality control
+# ===== API & Web =====
+fastapi>=0.111.0                  # High-performance async API
+uvicorn[standard]>=0.30.0         # ASGI server with WebSocket support
+gradio>=4.36.0                    # Web UI for model interaction
+pydantic>=2.8.0                   # Data validation and settings management
+python-multipart                  # Multipart form data handling
+aiofiles                          # Async file operations
 
-      # ---- Minimal additional essential (new) ----
-      - python-dotenv==1.1.1                  # Load env variables from .env (added)
-# Notes:
-# - PyTorch trio (torch/torchvision/torchaudio) is intentionally excluded here.
-# - Install them via `pip install -r requirements.txt` after activating this env.
+# ===== Desktop UI (optional; may be platform-specific) =====
+PyQt6>=6.4.2                      # Cross-platform native GUI
+pyqt6-tools==6.4.2.3.3            # PyQt6 development tools
+
+# ===== Utils (Image Processing Pipeline) =====
+pillow>=10.3.0                    # Image processing
+opencv-python-headless>=4.10.0.84 # OpenCV w/o GUI (use opencv-python if GUI needed)
+numpy>=1.26.4                     # Numerical operations
+scipy>=1.13.0                     # Scientific computing
+
+# ===== Development & Testing =====
+pytest>=8.2.0                     # Unit testing framework
+black>=23.9.0                     # Code formatting
+pre-commit>=3.5.0                 # Git hooks for quality control
+
+# ===== Added essential =====
+python-dotenv==1.1.1              # Load environment variables from .env

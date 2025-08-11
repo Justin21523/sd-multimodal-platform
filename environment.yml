@@ -22,7 +22,7 @@ dependencies:
       - transformers>=4.43.0 # Language model transformers
       - accelerate>=0.31.0 # Multi-GPU training acceleration
       - xformers==0.0.27.post2 # Memory-efficient attention (was paired with torch 2.3 + cu121)
-      - controlnet-aux>=0.6.0 # ControlNet auxiliary functions
+      - controlnet-aux>=0.0.10 # ControlNet auxiliary functions
       - safetensors>=0.4.3 # Efficient tensor storage format
       - einops>=0.7.0 # Flexible tensor operations
       - huggingface_hub>=0.24.0 # HuggingFace model hub integration
@@ -36,8 +36,8 @@ dependencies:
       - aiofiles
 
       # Desktop UI
-      - PyQt6>=6.6.0 # Cross-platform native GUI
-      - PyQt6-tools # PyQt6 development tools
+      - PyQt6>=6.4.2 # Cross-platform native GUI
+      - pyqt6-tools==6.4.2.3.3 # PyQt6 development tools
 
       # Utils (Image Processing Pipeline)
       - pillow>=10.3.0 # Image processing library
@@ -48,7 +48,7 @@ dependencies:
       # Development & Testing
       - pytest>=8.2.0 # Unit testing framework
       - black>=23.9.0 # Code formatting
-      - pre-commit>s=3.5.0 # Git hooks for quality control
+      - pre-commit>=3.5.0 # Git hooks for quality control
 
       # ---- Minimal additional essential (new) ----
       - python-dotenv==1.1.1 # Load env variables from .env (added)
