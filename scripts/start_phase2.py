@@ -12,7 +12,7 @@ import subprocess
 import requests
 import json
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import argparse
 import torch
 
@@ -36,7 +36,7 @@ def check_environment() -> Dict[str, Any]:
         )
 
     # Check required packages
-    required_packages = ["fastapi", "uvicorn", "torch", "pydantic", "python-dotenv"]
+    required_packages = ["fastapi", "uvicorn", "torch", "pydantic"]
 
     missing_packages = []
     for package in required_packages:
@@ -92,7 +92,7 @@ def check_environment() -> Dict[str, Any]:
 
 def start_server(
     port: int = 8000, background: bool = False
-) -> Any[subprocess.Popen, None]:
+) -> Optional[subprocess.Popen]:
     """Start the FastAPI server."""
     print(f"🚀 Starting FastAPI server on port {port}...")
 
@@ -405,4 +405,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()
