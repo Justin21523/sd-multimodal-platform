@@ -4,6 +4,7 @@ import logging
 from huggingface_hub import snapshot_download
 from utils.logging_utils import setup_logging, get_request_logger
 from services.models.sd_models import get_model_manager
+import argparse
 
 # Set up logging
 setup_logging()

@@ -3,6 +3,12 @@
 FastAPI main application with middleware, error handling, and API documentation.
 Phase 2: Backend Framework & Basic API Services
 """
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 import logging
 import time
@@ -109,7 +115,7 @@ async def request_logging_middleware(request: Request, call_next):
     req_logger = get_request_logger(request_id)
 
     # Log request start
-    logger.info(
+    req_logger.info(
         f"🔄 Request started",
         extra={
             "request_id": request_id,
@@ -133,7 +139,7 @@ async def request_logging_middleware(request: Request, call_next):
         response.headers["X-Process-Time"] = f"{process_time:.3f}"
 
         # Log successful response
-        logger.info(
+        req_logger.info(
             f"✅ Request completed",
             extra={
                 "request_id": request_id,
@@ -149,7 +155,7 @@ async def request_logging_middleware(request: Request, call_next):
         process_time = time.time() - start_time
 
         # Log error
-        logger.error(
+        req_logger.error(
             f"❌ Request failed",
             extra={
                 "request_id": request_id,
@@ -271,7 +277,7 @@ async def root():
         "version": "1.0.0-phase2",
         "phase": "Phase 2: Backend Framework & Basic API Services",
         "docs": f"{settings.API_PREFIX}/docs",
-        "health": "/health",
+        "health": f"{settings.API_PREFIX}/health",
     }
 
 
