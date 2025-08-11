@@ -2,14 +2,14 @@
 """
 Configuration management with Pydantic settings for environment variables.
 Phase 2: Backend Framework & Basic API Services
-Updated with logging and API framework settings.
+Updated for Pydantic v2.11.7 and RTX 5080 (sm_120) optimization.
 """
 
 import os
 from pathlib import Path
 from typing import List, Optional, Literal
-from pydantic_settings import BaseSettings
-from pydantic import field_validator, Field
+from pydantic import Field, field_validator, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 import torch
 import torch.version
 
@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     All settings can be overridden via environment variables.
     """
 
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=True, extra="ignore"
+    )
+
+    # API Configuration
+    API_PREFIX: str = Field(default="/api/v1", description="API route prefix")
+    HOST: str = Field(default="0.0.0.0", description="Server host")
+    PORT: int = Field(default=8000, description="Server port")
+    ALLOWED_ORIGINS: str = Field(
+        default="http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000",
+        description="CORS allowed origins (comma-separated)",
+    )
+
     # Logging Configuration
     LOG_LEVEL: str = Field(default="INFO", description="Logging level")
     LOG_FILE: str = Field(default="logs/app.log", description="Log file path")
@@ -27,21 +40,16 @@ class Settings(BaseSettings):
         default=True, description="Enable request logging middleware"
     )
 
-    # API basic settings
-    API_PREFIX: str = "/api/v1"
-    PORT: int = 8000
-    HOST: str = "0.0.0.0"
-    ALLOWED_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:8080",
-        "http://localhost:7860",
-    ]
-
-    # Hardware Configuration
+    # Hardware Configuration - RTX 5080 (sm_120) Optimized
     DEVICE: str = Field(default="cuda", description="PyTorch device (cuda/cpu)")
     TORCH_DTYPE: str = Field(default="float16", description="PyTorch data type")
+    USE_SDPA: bool = Field(
+        default=True,
+        description="Use PyTorch native SDPA (Scaled Dot Product Attention)",
+    )
     ENABLE_XFORMERS: bool = Field(
-        default=True, description="Enable xFormers optimization"
+        default=False,
+        description="Enable xFormers optimization (auto-detect if available)",
     )
     USE_ATTENTION_SLICING: bool = Field(
         default=True, description="Enable attention slicing"
@@ -49,7 +57,6 @@ class Settings(BaseSettings):
     ENABLE_CPU_OFFLOAD: bool = Field(
         default=False, description="Enable CPU offload for models"
     )
-    CUDA_VISIBLE_DEVICES: str = "0"
 
     # Model Configuration
     PRIMARY_MODEL: Literal["sd-1.5", "sdxl-base"] = Field(
@@ -126,10 +133,9 @@ class Settings(BaseSettings):
         default=True, description="Enable health check endpoints"
     )
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
+    # Development settings
+    DEBUG_MODE: bool = True
+    RELOAD_ON_CHANGE: bool = True
 
     @field_validator("DEVICE", mode="before")
     @classmethod
@@ -149,14 +155,6 @@ class Settings(BaseSettings):
             raise ValueError(f"TORCH_DTYPE must be one of {valid_dtypes}")
         return v
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
-    @classmethod
-    def validate_origins(cls, v):
-        """Parse CORS origins from string or list."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
-        return v
-
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
     def validate_log_level(cls, v):
@@ -165,6 +163,19 @@ class Settings(BaseSettings):
         if v.upper() not in valid_levels:
             raise ValueError(f"LOG_LEVEL must be one of {valid_levels}")
         return v.upper()
+
+    @computed_field
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        """Parse CORS origins from string to list."""
+        if isinstance(self.ALLOWED_ORIGINS, str):
+            origins = [
+                origin.strip()
+                for origin in self.ALLOWED_ORIGINS.split(",")
+                if origin.strip()
+            ]
+            return origins
+        return []
 
     def get_torch_dtype(self) -> torch.dtype:
         """Convert string dtype to PyTorch dtype."""
@@ -190,6 +201,10 @@ class Settings(BaseSettings):
         }
 
         return path_mapping.get(model_type, self.SD_MODEL_PATH)
+
+    def get_allowed_origins(self) -> List[str]:
+        """Get CORS allowed origins as a list."""
+        return self.allowed_origins_list
 
     def ensure_directories(self) -> None:
         """Create all required directories if they don't exist."""
@@ -261,5 +276,7 @@ if __name__ == "__main__":
     print("🔧 SD Multi-Modal Platform Configuration")
     print(f"Device: {settings.DEVICE}")
     print(f"Primary Model: {settings.PRIMARY_MODEL}")
+    print(f"Use SDPA: {settings.USE_SDPA}")
+    print(f"Enable xformers: {settings.ENABLE_XFORMERS}")
     print(f"Model Path: {settings.get_model_path()}")
     print(f"Output Path: {settings.OUTPUT_PATH}")
