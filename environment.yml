@@ -16,6 +16,7 @@ dependencies:
   - pip
   - setuptools
   - wheel
+  - pynvml
   - pip:
       # Diffusion Models Core
       - diffusers>=0.29.0 # HuggingFace diffusion pipeline
@@ -32,6 +33,7 @@ dependencies:
       - uvicorn[standard]>=0.30.0 # ASGI server with WebSocket support
       - gradio>=4.36.0 # Web UI for model interaction
       - pydantic>=2.8.0 # Data validation and settings management
+      - pydantic-settings>=2.0.0 # Settings management for pydantic v2
       - python-multipart # Multipart form data handling
       - aiofiles
 

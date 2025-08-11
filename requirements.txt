@@ -2,7 +2,7 @@
 # requirements.txt - Full Pip Environment for "sd-multimodal-platform"
 #
 # This file includes:
-#   1) PyTorch Nightly (CUDA 12.4) to support RTX 5080 (sm_120).
+#   1) PyTorch Nightly (CUDA 12.8) to support RTX 5080 (sm_120).
 #   2) All non-PyTorch packages from the original environment.yml (versions kept).
 #
 # Usage (example with venv):
@@ -16,12 +16,10 @@
 #              print(torch.cuda.get_device_name(0))"
 ################################################################################
 
-# ---- PyTorch Nightly (CUDA 12.4) for RTX 5080 / sm_120 ----
---extra-index-url https://download.pytorch.org/whl/nightly/cu124
---pre
-torch
-torchvision
-torchaudio
+# ---- PyTorch Nightly (CUDA 12.8) for RTX 5080 / sm_120 ----
+torch==2.9.0.dev20250810+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128
+torchvision==0.24.0.dev20250810+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128
+torchaudio==2.8.0.dev20250810+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128
 
 ################################################################################
 # Everything below mirrors your original environment.yml (versions unchanged),
@@ -43,6 +41,7 @@ fastapi>=0.111.0                  # High-performance async API
 uvicorn[standard]>=0.30.0         # ASGI server with WebSocket support
 gradio>=4.36.0                    # Web UI for model interaction
 pydantic>=2.8.0                   # Data validation and settings management
+pydantic-settings>=2.0.0   # Settings management for pydantic v2
 python-multipart                  # Multipart form data handling
 aiofiles                          # Async file operations
 
@@ -63,3 +62,4 @@ pre-commit>=3.5.0                 # Git hooks for quality control
 
 # ===== Added essential =====
 python-dotenv==1.1.1              # Load environment variables from .env
+nvidia-ml-py>=12.0.0   # provides 'pynvml' import
