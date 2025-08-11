@@ -1,45 +1,39 @@
-# ==========================================
-# SD Multi-Modal Platform Requirements
-# Phase 1: Core Functionality
-# ==========================================
+  - pip:
+      # Diffusion Models Core
+      - diffusers>=0.29.0                     # HuggingFace diffusion pipeline
+      - transformers>=4.43.0                  # Language model transformers
+      - accelerate>=0.31.0                    # Multi-GPU training acceleration
+      - xformers==0.0.27.post2                # Memory-efficient attention (was paired with torch 2.3 + cu121)
+      - controlnet-aux>=0.6.0                 # ControlNet auxiliary functions
+      - safetensors>=0.4.3                    # Efficient tensor storage format
+      - einops>=0.7.0                         # Flexible tensor operations
+      - huggingface_hub>=0.24.0               # HuggingFace model hub integration
 
-# Core Framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic[dotenv]==2.5.0
+      # API & Web
+      - fastapi>=0.111.0                      # High-performance async API
+      - uvicorn[standard]>=0.30.0             # ASGI server with WebSocket support
+      - gradio>=4.36.0                        # Web UI for model interaction
+      - pydantic>=2.8.0                       # Data validation and settings management
+      - python-multipart                      # Multipart form data handling
+      - aiofiles
 
-# AI/ML Core Libraries
-torch==2.1.0
-torchvision==0.16.0
-diffusers==0.24.0
-transformers==4.36.0
-accelerate==0.25.0
+      # Desktop UI
+      - PyQt6>=6.6.0                          # Cross-platform native GUI
+      - PyQt6-tools                           # PyQt6 development tools
 
-# Performance Optimization
-xformers==0.0.22.post7; sys_platform != "darwin"  # CPU/GPU memory optimization
+      # Utils (Image Processing Pipeline)
+      - pillow>=10.3.0                        # Image processing library
+      - opencv-python-headless>=4.10.0.84     # OpenCV for image processing
+      - numpy>=1.26.4                         # Numerical operations
+      - scipy>=1.13.0                         # Scientific computing library
 
-# Image Processing
-opencv-python==4.8.1.78
-Pillow==10.1.0
-numpy==1.24.4
+      # Development & Testing
+      - pytest>=8.2.0                         # Unit testing framework
+      - black>=23.9.0                         # Code formatting
+      - pre-commit>=3.5.0                     # Git hooks for quality control
 
-# HTTP & API
-httpx==0.25.2
-python-multipart==0.0.6  # For file uploads
-
-# Data & Serialization
-pydantic-settings==2.0.0
-python-json-logger==2.0.7
-
-# Environment & Configuration
-python-dotenv==1.0.0
-
-# Development & Testing (Phase 1)
-pytest==7.4.3
-pytest-asyncio==0.21.1
-black==23.11.0
-isort==5.12.0
-flake8==6.1.0
-
-# Optional: for UI and Interactivity
-gradio==4.7.1
+      # ---- Minimal additional essential (new) ----
+      - python-dotenv==1.1.1                  # Load env variables from .env (added)
+# Notes:
+# - PyTorch trio (torch/torchvision/torchaudio) is intentionally excluded here.
+# - Install them via `pip install -r requirements.txt` after activating this env.
