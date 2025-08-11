@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# scripts/quick_diagnosis.py
 """
 Quick diagnosis script for configuration issues.
 Helps identify Pydantic v2 configuration problems.
