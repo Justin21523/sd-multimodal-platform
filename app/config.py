@@ -1,9 +1,9 @@
 # app/config.py
 """
-Configuration management with Pydantic settings for environment variables.
-Phase 2: Backend Framework & Basic API Services
-Updated for Pydantic v2.11.7 and RTX 5080 (sm_120) optimization.
+Configuration management for SD Multi-Modal Platform Phase 3.
+Handles environment variables and system settings with Pydantic v2.
 """
+
 
 import os
 from pathlib import Path
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
 
     # Performance Limits
     MAX_WORKERS: int = Field(default=1, description="Maximum concurrent workers")
-    MAX_BATH_SIZE: int = Field(default=1, description="Maximum batch size per request")
+    MAX_BATCH_SIZE: int = Field(default=4, ge=1, le=8)
     MAX_QUEUE_SIZE: int = Field(default=100, description="Maximum queue size")
     REQUEST_TIMEOUT: int = Field(default=300, description="Request timeout in seconds")
     MAX_FILE_SIZE: int = Field(
