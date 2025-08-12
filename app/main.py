@@ -21,7 +21,6 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.exception_handlers import http_exception_handler
 from fastapi.staticfiles import StaticFiles
 
 import torch
@@ -194,7 +193,7 @@ async def request_logging_middleware(request: Request, call_next):
                 "success": False,
                 "error": "Internal server error",
                 "message": (
-                    str(exc) if settings.DEBUG_MODE else "An unexpected error occurred"
+                    str(exc) if settings.DEBUG else "An unexpected error occurred"
                 ),
                 "request_id": request_id,
                 "timestamp": time.time(),
@@ -359,7 +358,7 @@ async def server_info():
         "device": settings.DEVICE,
         "primary_model": settings.PRIMARY_MODEL,
         "output_path": settings.OUTPUT_PATH,
-        "debug_mode": settings.DEBUG_MODE,
+        "debug_mode": settings.DEBUG,
     }
 
     # Include GPU details if available
