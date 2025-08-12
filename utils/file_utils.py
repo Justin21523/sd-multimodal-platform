@@ -153,7 +153,7 @@ def copy_file_safe(src: Path, dst: Path) -> bool:
         return True
 
     except Exception as exc:
-        logger.error(f"Failed to copy {src} to {dst}: {e}")
+        logger.error(f"Failed to copy {src} to {dst}: {exc}")
         return False
 
 
