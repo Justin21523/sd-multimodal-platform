@@ -30,8 +30,7 @@ torchaudio==2.8.0.dev20250810+cu128 --index-url https://download.pytorch.org/whl
 diffusers>=0.29.0                 # HuggingFace diffusion pipeline
 transformers>=4.43.0              # Language model transformers
 accelerate>=0.31.0                # Multi-GPU training acceleration
-xformers==0.0.27.post2            # Mem-efficient attention (built for torch 2.3/cu121)
-controlnet-aux>=0.0.10             # ControlNet auxiliary functions
+controlnet-aux>=0.4.0             # ControlNet auxiliary functions
 safetensors>=0.4.3                # Efficient tensor storage format
 einops>=0.7.0                     # Flexible tensor operations
 huggingface_hub>=0.24.0           # HF model hub integration (name normalized by pip)
