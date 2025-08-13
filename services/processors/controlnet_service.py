@@ -278,7 +278,7 @@ class ControlNetManager:
         **generation_kwargs,
     ) -> Dict[str, Any]:
         """Generate image with ControlNet conditioning"""
-        gen_logger = get_generation_logger(f"controlnet_{controlnet_type}")
+        gen_logger = get_generation_logger("controlnet", controlnet_type)
 
         try:
             if not self.current_pipeline:
