@@ -1,3 +1,4 @@
+# utils/attention_utils.py
 """
 Attention processor utilities for RTX 5080 optimization and memory management.
 Handles attention mechanism setup, memory optimizations, and hardware compatibility.
@@ -6,7 +7,6 @@ Handles attention mechanism setup, memory optimizations, and hardware compatibil
 import logging
 import torch
 from typing import Dict, Any, Optional, Union, List
-import xformers
 from diffusers.models.attention_processor import (
     AttnProcessor2_0,
 )  # Import SDPA processor
@@ -17,38 +17,22 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-def setup_attention_processor(
-    pipeline, prefer_xformers: bool = False, force_sdpa: bool = False
-) -> str:
+def setup_attention_processor(pipeline, force_sdpa: bool = False) -> str:
     """
     Setup attention processor for the pipeline with RTX 5080 optimization.
 
     Args:
         pipeline: Diffusers pipeline to configure
-        prefer_xformers: Whether to prefer xformers if available
         force_sdpa: Force use of SDPA regardless of xformers availability
 
     Returns:
-        str: Type of attention processor used ("xformers", "sdpa", "default")
+        str: Type of attention processor used ("sdpa", "default")
     """
     try:
         # Force SDPA for RTX 5080 or if explicitly requested
         if force_sdpa:
             logger.info("Forcing SDPA attention processor")
             return _setup_sdpa_attention(pipeline)
-
-        # Try xformers first if preferred and not forced to SDPA
-        if prefer_xformers:
-            try:
-                logger.info("Attempting xformers attention setup...")
-                pipeline.enable_xformers_memory_efficient_attention()
-                logger.info("✅ xFormers attention enabled")
-                return "xformers"
-
-            except ImportError:
-                logger.warning("xFormers not installed, falling back to SDPA")
-            except Exception as e:
-                logger.warning(f"xFormers setup failed: {e}, falling back to SDPA")
 
         # Fall back to SDPA (recommended for RTX 5080)
         return _setup_sdpa_attention(pipeline)
@@ -166,13 +150,6 @@ def get_attention_info() -> Dict[str, Any]:
         "reason": "Default recommendation",
         "hardware_specific": False,
     }
-
-    # Check xformers availability
-    try:
-        info["available_processors"].append("xformers")
-        info["xformers_version"] = xformers.__version__
-    except ImportError:
-        pass
 
     # Check SDPA availability
     try:
@@ -485,7 +462,6 @@ def setup_pipeline_optimizations(pipeline, config: Dict[str, Any]) -> Dict[str, 
         # Setup attention processor
         attention_type = setup_attention_processor(
             pipeline,
-            prefer_xformers=config.get("enable_xformers", False),
             force_sdpa=config.get("use_sdpa", True),
         )
         results["attention_processor"] = attention_type
