@@ -165,6 +165,38 @@ class Txt2ImgRequest(BaseModel):
         return ControlNetConfig.validate_base64_image(v)
 
 
+class Img2ImgRequest(BaseModel):
+    """Image-to-image generation request"""
+
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    negative_prompt: str = Field(default="", max_length=2000)
+
+    # Source image (required)
+    init_image: str = Field(..., description="Base64 encoded source image")
+
+    # Core parameters
+    strength: float = Field(
+        default=0.75, ge=0.0, le=1.0, description="Noise injection strength"
+    )
+    model_id: Optional[str] = Field(default=None)
+
+    # Generation parameters (inherit defaults from config)
+    width: Optional[int] = Field(default=None, ge=256, le=2048)
+    height: Optional[int] = Field(default=None, ge=256, le=2048)
+    num_inference_steps: int = Field(default=25, ge=10, le=100)
+    guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
+    seed: Optional[int] = Field(default=None)
+
+    # Optional ControlNet
+    controlnet: Optional[ControlNetConfig] = Field(default=None)
+
+    @field_validator("init_image")
+    @classmethod
+    def validate_init_image(cls, v: str) -> str:
+        """Validate source image"""
+        return ControlNetConfig.validate_base64_image(v)
+
+
 class InpaintRequest(BaseModel):
     """Inpainting generation request"""
 
