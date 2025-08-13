@@ -1,17 +1,23 @@
 # app/api/v1/txt2img.py
 """
 SD Multi-Modal Platform - txt2img API Router
-This module provides the API endpoints for text-to-image generation.
+Real Text-to-Image API Implementation for Phase 3
+Handles actual image generation using loaded AI models.
 """
 
 import logging
 import time
+import uuid
 import asyncio
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, List, Optional
 from pathlib import Path
-
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, field_validator, Field
+from pydantic_settings import BaseSettings
+from PIL import Image
+import base64
+import io
 
 from app.config import Settings, settings, get_settings
 from app.schemas.requests import Txt2ImgRequest, PromptTemplate, BUILTIN_TEMPLATES
@@ -22,249 +28,327 @@ from app.schemas.responses import (
     ErrorResponse,
 )
 from services.generation.txt2img_service import Txt2ImgService
+from services.models.sd_models import get_model_manager, ModelRegistry
+
 from utils.logging_utils import get_request_logger
+from utils.file_utils import ensure_directory, safe_filename
+from utils.metadata_utils import save_metadata_json
+from utils.image_utils import image_to_base64, optimize_image
 
 
 # Create API router
-router = APIRouter()
+router = APIRouter(prefix="/txt2img", tags=["text-to-image"])
 logger = logging.getLogger(__name__)
 
-# Global txt2img service instance
-_txt2img_service = None
+
+async def get_model_manager_dependency():
+    """Dependency to get initialized model manager."""
+    manager = get_model_manager()
+    if not manager.is_initialized:
+        raise HTTPException(
+            status_code=503,
+            detail="Model manager not initialized. Please check server status.",
+        )
+    return manager
 
 
-async def get_txt2img_service() -> Txt2ImgService:
-    """Get the global txt2img service instance, initializing if necessary"""
-    global _txt2img_service
-
-    if _txt2img_service is None:
-        _txt2img_service = Txt2ImgService()
-        await _txt2img_service.initialize()
-
-    return _txt2img_service
-
-
-@router.post("/txt2img", response_model=Txt2ImgResponse)
+@router.post("/", response_model=Txt2ImgResponse)
 async def generate_image(
-    request: Txt2ImgRequest,
-    background_tasks: BackgroundTasks,
-    service: Txt2ImgService = Depends(get_txt2img_service),
-    config: Settings = Depends(get_settings),
-) -> Union[Txt2ImgResponse, JSONResponse]:
+    request_data: Txt2ImgRequest,
+    request: Request,
+    model_manager=Depends(get_model_manager_dependency),
+) -> Txt2ImgResponse:
     """
-    Handle text-to-image generation requests.
+    Generate images from text prompts using AI models.
 
-    Feattures:
-    - Supports custom prompts and negative prompts
-    - Allows for custom generation parameters
-    - Returns generated images with metadata
-    - Handles errors gracefully with detailed logging
-    - Supports background tasks for cleanup
-    - Provides prompt templates for easier prompt management
+    This endpoint creates images based on text descriptions using various
+    Stable Diffusion models. Supports model switching, parameter customization,
+    and batch generation.
     """
+    # Get request tracking info
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4())[:8])
+    task_id = f"txt2img_{int(time.time() * 1000)}"
+    req_logger = get_request_logger(request_id)
+
+    req_logger.info(f"Starting txt2img generation - Task: {task_id}")
+    req_logger.info(f"Prompt: {request_data.prompt[:100]}...")
+
     start_time = time.time()
 
-    # Generate a unique task ID based on the current time and prompt hash
-    task_id = f"txt2img_{int(time.time() * 1000)}_{request.get_prompt_hash()}"
-
-    # Initialize request logger
-    request_logger = get_request_logger(task_id)
-    request_logger.info(
-        f"🎨 Starting txt2img generation",
-        extra={
-            "task_id": task_id,
-            "prompt_length": len(request.prompt),
-            "model_id": request.model_id,
-            "dimensions": (
-                f"{request.generation_params.width}x{request.generation_params.height}"
-                if request.generation_params
-                else "default"
-            ),
-            "steps": (
-                request.generation_params.num_inference_steps
-                if request.generation_params
-                else config.DEFAULT_STEPS
-            ),
-            "seed": (
-                request.generation_params.seed
-                if request.generation_params
-                else "random"
-            ),
-        },
-    )
-
     try:
-        # === Parameter Validation ===
-        effective_params = request.get_effective_params()
+        # Determine target model
+        target_model = request_data.model_id or settings.PRIMARY_MODEL
 
-        # Record the effective parameters for logging
-        request_logger.debug(f"Generation parameters: {effective_params}")
-
-        # Check if the model ID is valid
-        model_load_start = time.time()
-
-        # Check if model_id is provided, otherwise use primary model
-        current_model = await service.ensure_model_loaded(request.model_id)
-
-        model_load_time = time.time() - model_load_start
-
-        request_logger.info(
-            f"✅ Model ready: {current_model}",
-            extra={"model": current_model, "load_time": model_load_time},
-        )
-
-        # === Image Generation ===1
-        generation_start = time.time()
-
-        # Generate the image using the service
-        generation_result = await service.generate_image(
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt or "",
-            **effective_params,
-        )
-
-        generation_time = time.time() - generation_start
-
-        request_logger.info(
-            f"🖼️  Image generation completed",
-            extra={
-                "generation_time": generation_time,
-                "output_path": generation_result.get("image_path"),
-                "vram_used": generation_result.get("vram_used", "unknown"),
-            },
-        )
-
-        # === Metadata Handling ===
-        save_start = time.time()
-
-        # Create metadata object
-        metadata = ImageMetadata(
-            seed=effective_params["seed"],
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt or "",
-            model=current_model,
-            model_hash=generation_result.get("model_hash"),
-            width=effective_params["width"],
-            height=effective_params["height"],
-            steps=effective_params["num_inference_steps"],
-            cfg_scale=effective_params["guidance_scale"],
-            sampler=effective_params.get("sampler", "default"),
-            scheduler=effective_params.get("scheduler", config.DEFAULT_SCHEDULER),
-            generation_time=generation_time,
-            device=config.DEVICE,
-            vram_used=generation_result.get("vram_used"),
-            peak_memory=generation_result.get("peak_memory"),
-            filename=Path(generation_result["image_path"]).name,
-            file_size=generation_result.get("file_size"),
-        )
-
-        # Save metadata if requested
-        if request.save_metadata:
-            metadata_path = await service.save_metadata(metadata, task_id)
-            request_logger.debug(f"Metadata saved: {metadata_path}")
-
-        # Record the time taken to save metadata
-
-        # Generate the image URL
-        image_url = f"/outputs/txt2img/{Path(generation_result['image_path']).name}"
-
-        # Create the GeneratedImage response object
-        generated_image = GeneratedImage(
-            url=image_url,
-            filename=Path(generation_result["image_path"]).name,
-            local_path=generation_result["image_path"],
-            metadata=metadata,
-            width=effective_params["width"],
-            height=effective_params["height"],
-            seed=effective_params["seed"],
-        )
-
-        # If base64 encoding is requested, convert the image to base64
-        if request.return_base64:
-            generated_image.base64_data = await service.get_image_base64(
-                generation_result["image_path"]
+        # Validate model exists
+        if target_model not in ModelRegistry.list_models():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown model: {target_model}. Available: {ModelRegistry.list_models()}",
             )
 
-        # Calculate total time taken for the request
-        total_time = time.time() - start_time
+        # Switch model if needed
+        if model_manager.current_model_id != target_model:
+            req_logger.info(f"Switching to model: {target_model}")
+            switch_success = await model_manager.switch_model(target_model)
+            if not switch_success:
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to load model: {target_model}"
+                )
 
-        # Create the success response
-        response = Txt2ImgResponse.success_response(
-            images=[generated_image],
-            task_id=task_id,
-            total_time=total_time,
-            generation_time=generation_time,
-            model_used=current_model,
-            device_used=config.DEVICE,
-            model_load_time=model_load_time if model_load_time > 0.1 else None,
-        )
+        # Prepare generation parameters
+        generation_params = {
+            "prompt": request_data.prompt,
+            "negative_prompt": request_data.negative_prompt,
+            "width": request_data.width,
+            "height": request_data.height,
+            "num_inference_steps": request_data.num_inference_steps,
+            "guidance_scale": request_data.guidance_scale,
+            "seed": request_data.seed,
+            "num_images": request_data.num_images,
+        }
 
-        # If cleanup is needed, add it as a background task
-        if config.KEEP_GENERATIONS_DAYS > 0:
-            background_tasks.add_task(
-                service.cleanup_old_files, days=config.KEEP_GENERATIONS_DAYS
+        req_logger.info(f"Generation params: {generation_params}")
+
+        # Generate images
+        generation_result = await model_manager.generate_image(**generation_params)
+        images = generation_result["images"]
+        metadata = generation_result["metadata"]
+
+        # Process results
+        image_data = []
+        saved_paths = []
+
+        for i, image in enumerate(images):
+            image_info = {
+                "index": i,
+                "width": image.width,
+                "height": image.height,
+                "mode": image.mode,
+            }
+
+            # Save image if requested
+            if request_data.save_images:
+                # Create output directory
+                output_dir = Path(settings.OUTPUT_PATH) / "txt2img"
+                ensure_directory(output_dir)
+
+                # Generate safe filename
+                prompt_part = safe_filename(request_data.prompt[:50])
+                timestamp = int(time.time())
+                filename = (
+                    f"{timestamp}_{prompt_part}_seed{metadata['seed']}_{i:02d}.png"
+                )
+                image_path = output_dir / filename
+
+                # Optimize and save
+                optimized_image = optimize_image(image, quality=95)
+                optimized_image.save(image_path, "PNG", optimize=True)
+
+                image_info["file_path"] = str(image_path.relative_to(Path.cwd()))
+                image_info["file_size_bytes"] = image_path.stat().st_size
+                saved_paths.append(image_path)
+
+                req_logger.info(f"Saved image {i}: {image_path}")
+
+            # Add base64 if requested
+            if request_data.return_base64:
+                image_info["base64"] = image_to_base64(image, format="PNG")
+
+            image_data.append(image_info)
+
+        # Save metadata
+        if request_data.save_images and saved_paths:
+            metadata_path = (
+                saved_paths[0].parent / f"{saved_paths[0].stem}_metadata.json"
             )
-
-        request_logger.info(
-            f"✅ txt2img completed successfully",
-            extra={
+            complete_metadata = {
+                **metadata,
                 "task_id": task_id,
-                "total_time": total_time,
-                "output_file": generated_image.filename,
-            },
-        )
+                "request_id": request_id,
+                "request_params": request_data.dict(),
+                "saved_files": [str(p.relative_to(Path.cwd())) for p in saved_paths],
+                "total_time": time.time() - start_time,
+            }
+            save_metadata_json(complete_metadata, metadata_path)
+            req_logger.info(f"Saved metadata: {metadata_path}")
 
-        return response
-
-    except Exception as exc:
-        logger.error(f"Failed to get service status: {exc}")
-
-        # Log the error with detailed information
+        # Build response
         total_time = time.time() - start_time
 
-        # Log the error with detailed information
-        request_logger.error(
-            f"❌ txt2img generation failed: {str(exc)}",
+        response_data = {
+            "task_id": task_id,
+            "model_used": {
+                "model_id": metadata["model_id"],
+                "model_name": metadata["model_name"],
+            },
+            "generation_params": {
+                "prompt": metadata["prompt"],
+                "negative_prompt": metadata["negative_prompt"],
+                "width": metadata["width"],
+                "height": metadata["height"],
+                "steps": metadata["num_inference_steps"],
+                "cfg_scale": metadata["guidance_scale"],
+                "seed": metadata["seed"],
+            },
+            "results": {
+                "num_images": len(images),
+                "images": image_data,
+                "generation_time": metadata["generation_time"],
+                "total_time": round(total_time, 2),
+                "vram_used_gb": metadata["vram_used_gb"],
+            },
+            "optimization_info": metadata["optimization_info"],
+        }
+
+        req_logger.info(
+            f"✅ Generation completed successfully",
             extra={
                 "task_id": task_id,
-                "error_type": type(exc).__name__,
+                "generation_time": metadata["generation_time"],
                 "total_time": total_time,
+                "vram_used": metadata["vram_used_gb"],
+                "num_images": len(images),
             },
-            exc_info=True,
         )
 
-        # Determine the error code and status based on the exception type
-        msg = str(exc)
-        if isinstance(exc, ValueError):
-            # Validation error (e.g., invalid parameters)
-            error_code = "VALIDATION_ERROR"
-            status_code = 422
-        elif "CUDA out of memory" in msg or "OutOfMemoryError" in msg:
-            # CUDA out of memory error
-            error_code = "OUT_OF_MEMORY"
-            status_code = 507  # Insufficient Storage
-        elif "model" in msg.lower() and "not found" in msg.lower():
-            # Model not found error
-            error_code = "MODEL_NOT_FOUND"
-            status_code = 404
-        else:
-            # General generation error
-            error_code = "GENERATION_ERROR"
-            status_code = 500
-
-        # Create the error response
-        error_response = Txt2ImgResponse.error_response(
-            error_message=msg,
+        return Txt2ImgResponse(
+            success=True,
             task_id=task_id,
-            error_code=error_code,
-            model_used=getattr(service, "current_model", "unknown"),
-            device_used=config.DEVICE,
+            message=f"Generated {len(images)} images successfully",
+            data=response_data,
+            request_id=request_id,
+            timestamp=time.time(),
         )
 
-        # If cleanup is needed, add it as a background task
-        return JSONResponse(
-            status_code=status_code,
-            content=error_response.model_dump(),  # pydantic v2 -> model_dump()
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+
+    except Exception as e:
+        req_logger.error(
+            f"❌ Generation failed: {str(e)}",
+            extra={
+                "task_id": task_id,
+                "error_type": type(e).__name__,
+                "total_time": time.time() - start_time,
+            },
+        )
+
+        raise HTTPException(
+            status_code=500, detail=f"Image generation failed: {str(e)}"
+        )
+
+
+@router.get("/status")
+async def get_txt2img_status(
+    model_manager=Depends(get_model_manager_dependency),
+) -> Dict[str, Any]:
+    """Get current txt2img service status and model information."""
+
+    status = model_manager.get_status()
+
+    # Add service-specific info
+    service_status = {
+        "service": "txt2img",
+        "endpoint": "/api/v1/txt2img",
+        "model_manager": status,
+        "supported_parameters": {
+            "prompt": "Required text prompt",
+            "negative_prompt": "Optional negative prompt",
+            "model_id": f"Optional model ({ModelRegistry.list_models()})",
+            "width": "256-2048 (multiples of 8)",
+            "height": "256-2048 (multiples of 8)",
+            "num_inference_steps": "10-100",
+            "guidance_scale": "1.0-20.0",
+            "seed": "Random seed or -1 for random",
+            "num_images": f"1-{settings.MAX_BATCH_SIZE}",
+        },
+        "available_models": {},
+    }
+
+    # Add detailed model info
+    for model_id in ModelRegistry.list_models():
+        model_info = ModelRegistry.get_model_info(model_id)
+        service_status["available_models"][model_id] = {
+            "name": model_info["name"],  # type: ignore
+            "default_resolution": model_info["default_resolution"],  # type: ignore
+            "vram_requirement": f"{model_info['vram_requirement']}GB",  # type: ignore
+            "strengths": model_info["strengths"],  # type: ignore
+            "use_cases": model_info["use_cases"],  # type: ignore
+        }
+
+    return service_status
+
+
+@router.get("/models")
+async def list_available_models() -> Dict[str, Any]:
+    """List all available models with their capabilities and status."""
+
+    models_info = {}
+    model_manager = get_model_manager()
+
+    for model_id in ModelRegistry.list_models():
+        model_info = ModelRegistry.get_model_info(model_id)
+
+        # Check if model files exist
+        model_path = (
+            Path(settings.OUTPUT_PATH).parent / "models" / model_info["local_path"]  # type: ignore
+        )
+        is_installed = model_path.exists()
+        is_loaded = model_manager.current_model_id == model_id
+
+        models_info[model_id] = {
+            **model_info,  # type: ignore
+            "is_installed": is_installed,
+            "is_loaded": is_loaded,
+            "model_path": str(model_path),
+        }
+
+    return {
+        "available_models": models_info,
+        "currently_loaded": model_manager.current_model_id,
+        "total_models": len(models_info),
+        "installed_models": sum(
+            1 for info in models_info.values() if info["is_installed"]
+        ),
+    }
+
+
+@router.post("/switch-model")
+async def switch_model(
+    model_id: str, model_manager=Depends(get_model_manager_dependency)
+) -> Dict[str, Any]:
+    """Switch to a different model."""
+
+    if model_id not in ModelRegistry.list_models():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model: {model_id}. Available: {ModelRegistry.list_models()}",
+        )
+
+    if model_id == model_manager.current_model_id:
+        return {
+            "success": True,
+            "message": f"Model {model_id} is already loaded",
+            "current_model": model_id,
+        }
+
+    # Perform switch
+    switch_start = time.time()
+    success = await model_manager.switch_model(model_id)
+    switch_time = time.time() - switch_start
+
+    if success:
+        return {
+            "success": True,
+            "message": f"Successfully switched to model: {model_id}",
+            "previous_model": model_manager.current_model_id,
+            "current_model": model_id,
+            "switch_time": round(switch_time, 2),
+        }
+    else:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to switch to model: {model_id}"
         )
 
 
@@ -314,77 +398,9 @@ async def preview_prompt_with_template(
     }
 
 
-@router.get("/txt2img/status")
-async def get_generation_status(
-    service: Txt2ImgService = Depends(get_txt2img_service),
-    config: Settings = Depends(get_settings),
-) -> Dict[str, Any]:
-    """Get the current status of the txt2img service"""
-
-    try:
-        status_info = await service.get_status()
-
-        return {
-            "success": True,
-            "status": "ready",
-            "data": {
-                "current_model": status_info.get("current_model"),
-                "model_loaded": status_info.get("model_loaded", False),
-                "device": config.DEVICE,
-                "memory_info": status_info.get("memory_info"),
-                "recent_generations": status_info.get("recent_count", 0),
-                "average_generation_time": status_info.get("avg_time"),
-                "service_uptime": status_info.get("uptime"),
-            },
-            "message": "Service status retrieved successfully",
-        }
-
-    except Exception as exc:
-        logger.error(f"Failed to get service status: {exc}")
-
-        return {
-            "success": False,
-            "status": "error",
-            "error": str(exc),
-            "message": "Failed to retrieve service status",
-        }
-
-
-@router.get("/txt2img/status")
-async def get_service_status() -> Dict[str, Any]:
-    """取得服務狀態"""
-
-    return {
-        "success": True,
-        "status": "ready",
-        "data": {
-            "service": "txt2img",
-            "version": "1.0.0-phase1",
-            "device": settings.DEVICE,
-            "primary_model": settings.PRIMARY_MODEL,
-            "torch_dtype": settings.TORCH_DTYPE,
-            "service_features": [
-                "Type-safe pipeline result handling",
-                "Multiple image format support",
-                "Unified PIL.Image extraction",
-                "Memory optimization ready",
-            ],
-            "supported_result_types": [
-                "StableDiffusionXLPipelineOutput",
-                "StableDiffusionPipelineOutput",
-                "List[PIL.Image]",
-                "List[np.ndarray]",
-                "np.ndarray (batch)",
-                "PyTorch tensors",
-            ],
-        },
-        "timestamp": time.time(),
-    }
-
-
 @router.get("/txt2img/test-types")
 async def test_type_handling() -> Dict[str, Any]:
-    """測試型別處理邏輯 (開發用)"""
+    """Test endpoint to verify type handling and safety features"""
 
     return {
         "success": True,

@@ -1,15 +1,16 @@
 # app/config.py
 """
-Configuration management with Pydantic settings for environment variables.
-Phase 2: Backend Framework & Basic API Services
-Updated for Pydantic v2.11.7 and RTX 5080 (sm_120) optimization.
+Configuration management for SD Multi-Modal Platform Phase 3.
+Handles environment variables and system settings with Pydantic v2.
 """
+
 
 import os
 from pathlib import Path
 from typing import List, Optional, Literal
 from pydantic import Field, field_validator, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import re
 import torch
 import torch.version
 
@@ -35,7 +36,7 @@ class Settings(BaseSettings):
 
     # Logging Configuration
     LOG_LEVEL: str = Field(default="INFO", description="Logging level")
-    LOG_FILE: str = Field(default="logs/app.log", description="Log file path")
+    LOG_FILE_PATH: str = Field(default="logs/app.log", description="Log file path")
     ENABLE_REQUEST_LOGGING: bool = Field(
         default=True, description="Enable request logging middleware"
     )
@@ -57,30 +58,23 @@ class Settings(BaseSettings):
     ENABLE_CPU_OFFLOAD: bool = Field(
         default=False, description="Enable CPU offload for models"
     )
+    ENABLE_MODEL_COMPILATION: bool = Field(
+        default=False, description="Enable PyTorch 2.0+ model compilation"
+    )
 
     # Model Configuration
-    PRIMARY_MODEL: Literal["sd-1.5", "sdxl-base"] = Field(
+    PRIMARY_MODEL: Literal["sdxl-base", "sd-1.5", "sd-2.1"] = Field(
         default="sdxl-base", description="Primary model to load on startup"
     )
-    SD_MODEL_PATH: Path = Field(
-        default=Path("./models/stable-diffusion/sd-1.5"),
-        description="SD 1.5 models directory",
-    )
-    SDXL_MODEL_PATH: Path = Field(
-        default=Path("./models/stable-diffusion/sdxl"),
-        description="SDXL models directory",
-    )
-    CONTROLNET_PATH: Path = Field(
-        default=Path("./models/controlnet"), description="ControlNet models directory"
-    )
-    LORA_PATH: Path = Field(
-        default=Path("./models/lora"), description="LoRA models directory"
-    )
-    VAE_PATH: Path = Field(
-        default=Path("./models/vae"), description="VAE models directory"
-    )
-    UPSCALE_MODEL_PATH: Path = Field(
-        default=Path("./models/upscale"), description="Upscale models directory"
+
+    # Model paths
+    SD_MODEL_PATH: str = Field(default="./models/stable-diffusion")
+    SDXL_MODEL_PATH: str = Field(default="./models/sdxl")
+    CONTROLNET_PATH: str = Field(default="./models/controlnet")
+    LORA_PATH: str = Field(default="./models/lora")
+    VAE_PATH: str = Field(default="./models/vae")
+    UPSCALE_MODEL_PATH: str = Field(
+        default="./models/upscale", description="Upscale models directory"
     )
 
     # Generation Defaults
@@ -94,12 +88,10 @@ class Settings(BaseSettings):
 
     # Performance Limits
     MAX_WORKERS: int = Field(default=1, description="Maximum concurrent workers")
-    MAX_BATCH_SIZE: int = Field(default=1, description="Maximum batch size per request")
+    MAX_BATCH_SIZE: int = Field(default=4, ge=1, le=8)
     MAX_QUEUE_SIZE: int = Field(default=100, description="Maximum queue size")
     REQUEST_TIMEOUT: int = Field(default=300, description="Request timeout in seconds")
-    MAX_FILE_SIZE: int = Field(
-        default=10 * 1024 * 1024, description="Maximum upload file size in bytes"
-    )
+    MAX_FILE_SIZE: str = Field(default="10MB")
 
     # Storage Configuration
     OUTPUT_PATH: Path = Field(
@@ -125,17 +117,33 @@ class Settings(BaseSettings):
         default=True, description="Enable API rate limiting"
     )
 
-    # Feature Flags
-    ENABLE_PROMETHEUS: bool = Field(
-        default=False, description="Enable Prometheus metrics"
-    )
+    # Monitoring
+    ENABLE_PROMETHEUS: bool = Field(default=False)
     ENABLE_HEALTH_CHECKS: bool = Field(
         default=True, description="Enable health check endpoints"
     )
+    SENTRY_DSN: str = Field(default="")
 
     # Development settings
-    DEBUG_MODE: bool = True
-    RELOAD_ON_CHANGE: bool = True
+    DEBUG: bool = True
+    RELOAD: bool = True
+
+    # Model Download Settings
+    HF_TOKEN: str = Field(default="")
+    USE_AUTH_TOKEN: bool = Field(default=False)
+    CACHE_DIR: str = Field(default="./cache")
+
+    # Phase 3 Specific Settings
+    AUTO_MODEL_SWITCHING: bool = Field(default=True)
+    PRELOAD_MODELS: bool = Field(default=False)
+    ENABLE_MODEL_CACHING: bool = Field(default=True)
+    GENERATION_QUEUE_SIZE: int = Field(default=100)
+
+    # Experimental Features
+    ENABLE_CONTROLNET: bool = Field(default=False)
+    ENABLE_LORA: bool = Field(default=False)
+    ENABLE_VIDEO_GENERATION: bool = Field(default=False)
+    ENABLE_BATCH_API: bool = Field(default=False)
 
     @field_validator("DEVICE", mode="before")
     @classmethod
@@ -154,6 +162,20 @@ class Settings(BaseSettings):
         if v not in valid_dtypes:
             raise ValueError(f"TORCH_DTYPE must be one of {valid_dtypes}")
         return v
+
+    @field_validator("DEFAULT_WIDTH", "DEFAULT_HEIGHT", mode="before")
+    @classmethod
+    def validate_dimensions(cls, v):
+        """Ensure dimensions are multiples of 8."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None  # Default to None if empty
+        if isinstance(v, str):
+            # Allow ""1024" "1024px" or similar formats
+            m = re.search(r"\d+", v)
+            if not m:
+                raise ValueError("DEFAULT_* must be an integer")
+            v = int(m.group())
+        return ((v + 7) // 8) * 8
 
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
@@ -186,51 +208,79 @@ class Settings(BaseSettings):
         }
         return dtype_mapping[self.TORCH_DTYPE]
 
-    def get_model_path(self, model_type: str = "") -> Path:
-        """Get model path based on type or primary model."""
-        if model_type is None:
-            model_type = self.PRIMARY_MODEL
+    def get_model_path(self, model_type: str = "primary") -> str:
+        """Get model path for specified type."""
+        if model_type == "primary":
+            if self.PRIMARY_MODEL == "sdxl-base":
+                return f"{self.SDXL_MODEL_PATH}/sdxl-base"
+            elif self.PRIMARY_MODEL in ["sd-1.5", "sd-2.1", "custom"]:
+                return f"{self.SD_MODEL_PATH}/{self.PRIMARY_MODEL}"
+        elif model_type == "controlnet":
+            return self.CONTROLNET_PATH
+        elif model_type == "lora":
+            return self.LORA_PATH
+        elif model_type == "vae":
+            return self.VAE_PATH
 
-        path_mapping = {
-            "sd-1.5": self.SD_MODEL_PATH,
-            "sdxl-base": self.SDXL_MODEL_PATH,
-            "controlnet": self.CONTROLNET_PATH,
-            "lora": self.LORA_PATH,
-            "vae": self.VAE_PATH,
-            "upscale": self.UPSCALE_MODEL_PATH,
-        }
-
-        return path_mapping.get(model_type, self.SD_MODEL_PATH)
+        return self.SD_MODEL_PATH
 
     def get_allowed_origins(self) -> List[str]:
         """Get CORS allowed origins as a list."""
         return self.allowed_origins_list
 
     def ensure_directories(self) -> None:
-        """Create all required directories if they don't exist."""
+        """Create necessary directories."""
         directories = [
             self.OUTPUT_PATH,
-            self.ASSETS_PATH,
-            self.SD_MODEL_PATH,
-            self.SDXL_MODEL_PATH,
-            self.CONTROLNET_PATH,
-            self.LORA_PATH,
-            self.VAE_PATH,
-            self.UPSCALE_MODEL_PATH,
-            Path("logs"),  # For log files
+            f"{self.OUTPUT_PATH}/txt2img",
+            f"{self.OUTPUT_PATH}/img2img",
+            f"{self.OUTPUT_PATH}/inpaint",
+            f"{self.OUTPUT_PATH}/upscale",
+            Path(self.LOG_FILE_PATH).parent,
+            self.CACHE_DIR,
         ]
+
         for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
+            Path(directory).mkdir(parents=True, exist_ok=True)
 
     def get_generation_defaults(self) -> dict:
-        """Get default generation parameters as dictionary."""
+        """Get default generation parameters."""
         return {
             "width": self.DEFAULT_WIDTH,
             "height": self.DEFAULT_HEIGHT,
-            "steps": self.DEFAULT_STEPS,
-            "cfg_scale": self.DEFAULT_CFG,
+            "num_inference_steps": self.DEFAULT_STEPS,
+            "guidance_scale": self.DEFAULT_CFG,
             "sampler": self.DEFAULT_SAMPLER,
         }
+
+    def is_development(self) -> bool:
+        """Check if running in development mode."""
+        return self.DEBUG or self.RELOAD
+
+    def get_vram_estimate(self, model_id: str, width: int, height: int) -> float:
+        """Estimate VRAM usage for given parameters."""
+        # Base VRAM estimates in GB
+        base_vram = {"sd-1.5": 4.0, "sd-2.1": 6.0, "sdxl-base": 8.0}
+
+        # Resolution multiplier
+        pixels = width * height
+        base_pixels = 512 * 512
+        resolution_multiplier = pixels / base_pixels
+
+        # Data type multiplier
+        dtype_multiplier = 0.5 if self.TORCH_DTYPE == "float16" else 1.0
+
+        estimated_vram = (
+            base_vram.get(model_id, 8.0) * resolution_multiplier * dtype_multiplier
+        )
+
+        # Add overhead for optimizations
+        if self.USE_ATTENTION_SLICING:
+            estimated_vram *= 0.8
+        if self.ENABLE_CPU_OFFLOAD:
+            estimated_vram *= 0.6
+
+        return round(estimated_vram, 1)
 
     def get_device_info(self) -> dict:
         """Get device information for health checks."""
@@ -261,7 +311,6 @@ class Settings(BaseSettings):
 
 # Create global settings instance
 settings = Settings()
-
 # Ensure directories are created at startup
 settings.ensure_directories()
 
