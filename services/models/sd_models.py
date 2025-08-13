@@ -26,8 +26,11 @@ from PIL import Image
 
 from app.config import settings
 from services.generation.txt2img_service import Txt2ImgService
-from utils.logging_utils import setup_logging, get_request_logger
-from utils.attention_utils import setup_attention_processor, setup_memory_optimizations
+from utils.logging_utils import setup_logging
+from utils.attention_utils import (
+    setup_attention_processor,
+    setup_pipeline_optimizations,
+)
 
 # Set up logging
 setup_logging()
@@ -41,7 +44,7 @@ class ModelRegistry:
         "sdxl-base": {
             "name": "Stable Diffusion XL Base",
             "pipeline_class": StableDiffusionXLPipeline,
-            "local_path": "models/sdxl/sdxl-base",
+            "local_path": "sdxl/sdxl-base",
             "default_resolution": (1024, 1024),
             "vram_requirement": 8,
             "strengths": ["photorealistic", "commercial", "advertising", "high-detail"],
@@ -55,7 +58,7 @@ class ModelRegistry:
         "sd-1.5": {
             "name": "Stable Diffusion v1.5",
             "pipeline_class": StableDiffusionPipeline,
-            "local_path": "models/stable-diffusion/sd-1.5",
+            "local_path": "stable-diffusion/sd-1.5",
             "default_resolution": (512, 512),
             "vram_requirement": 4,
             "strengths": ["anime", "character", "lora-ecosystem", "fast"],
@@ -69,7 +72,7 @@ class ModelRegistry:
         "sd-2.1": {
             "name": "Stable Diffusion v2.1",
             "pipeline_class": StableDiffusionPipeline,
-            "local_path": "models/stable-diffusion/sd-2.1",
+            "local_path": "stable-diffusion/sd-2.1",
             "default_resolution": (768, 768),
             "vram_requirement": 6,
             "strengths": ["improved-quality", "composition", "versatile"],
@@ -212,41 +215,48 @@ class ModelManager:
 
     def _apply_optimizations(self, pipeline) -> Dict[str, Any]:
         """Apply memory and performance optimizations to pipeline."""
-        optimization_info = {
-            "attention_type": "unknown",
-            "memory_optimizations": [],
-            "compilation": False,
+        optimization_config = {
+            "enable_xformers": settings.ENABLE_XFORMERS,
+            "use_sdpa": settings.USE_SDPA,
+            "enable_cpu_offload": settings.ENABLE_CPU_OFFLOAD,
+            "use_attention_slicing": settings.USE_ATTENTION_SLICING,
+            "enable_vae_slicing": True,  # Generally safe to enable
+            "enable_model_compilation": getattr(
+                settings, "ENABLE_MODEL_COMPILATION", False
+            ),
         }
 
         try:
-            # Setup attention processor (RTX 5080 optimized)
-            attention_type = setup_attention_processor(
-                pipeline,
-                prefer_xformers=settings.ENABLE_XFORMERS,
-                force_sdpa=settings.USE_SDPA,
+            # Use the comprehensive optimization function
+            optimization_results = setup_pipeline_optimizations(
+                pipeline, optimization_config
             )
-            optimization_info["attention_type"] = attention_type
 
-            # Memory optimizations
-            memory_opts = setup_memory_optimizations(
-                pipeline,
-                attention_type=attention_type,
-                enable_cpu_offload=settings.ENABLE_CPU_OFFLOAD,
-                enable_attention_slicing=settings.USE_ATTENTION_SLICING,
+            logger.info(
+                f"Applied {optimization_results['total_optimizations']} optimizations"
             )
-            optimization_info["memory_optimizations"] = memory_opts
+            if optimization_results.get("warnings"):
+                for warning in optimization_results["warnings"]:
+                    logger.warning(f"Optimization warning: {warning}")
 
-            # Model compilation (PyTorch 2.0+)
-            if hasattr(torch, "compile") and settings.ENABLE_MODEL_COMPILATION:
-                try:
-                    pipeline.unet = torch.compile(pipeline.unet, mode="reduce-overhead")
-                    optimization_info["compilation"] = True
-                    logger.info("✅ Model compilation enabled")
-                except Exception as e:
-                    logger.warning(f"Model compilation failed: {e}")
+            return optimization_results
 
         except Exception as e:
             logger.warning(f"Some optimizations failed: {e}")
+
+            if hasattr(torch, "compile") and settings.ENABLE_MODEL_COMPILATION:
+                try:
+                    pipeline.unet = torch.compile(pipeline.unet, mode="reduce-overhead")
+                    optimization_info["compilation"] = True  # type: ignore
+                    logger.info("✅ Model compilation enabled")
+                except Exception as e:
+                    logger.warning(f"Model compilation failed: {e}")
+            return {
+                "attention_processor": "default",
+                "memory_optimizations": [],
+                "total_optimizations": 0,
+                "warnings": [f"Optimization setup failed: {e}"],
+            }
 
         return optimization_info
 

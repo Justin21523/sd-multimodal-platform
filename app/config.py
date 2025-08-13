@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Optional, Literal
 from pydantic import Field, field_validator, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import re
 import torch
 import torch.version
 
@@ -90,9 +91,7 @@ class Settings(BaseSettings):
     MAX_BATCH_SIZE: int = Field(default=4, ge=1, le=8)
     MAX_QUEUE_SIZE: int = Field(default=100, description="Maximum queue size")
     REQUEST_TIMEOUT: int = Field(default=300, description="Request timeout in seconds")
-    MAX_FILE_SIZE: int = Field(
-        default=10 * 1024 * 1024, description="Maximum upload file size in bytes"
-    )
+    MAX_FILE_SIZE: str = Field(default="10MB")
 
     # Storage Configuration
     OUTPUT_PATH: Path = Field(
@@ -166,8 +165,16 @@ class Settings(BaseSettings):
 
     @field_validator("DEFAULT_WIDTH", "DEFAULT_HEIGHT", mode="before")
     @classmethod
-    def validate_dimensions(cls, v: int) -> int:
+    def validate_dimensions(cls, v):
         """Ensure dimensions are multiples of 8."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None  # Default to None if empty
+        if isinstance(v, str):
+            # Allow ""1024" "1024px" or similar formats
+            m = re.search(r"\d+", v)
+            if not m:
+                raise ValueError("DEFAULT_* must be an integer")
+            v = int(m.group())
         return ((v + 7) // 8) * 8
 
     @field_validator("LOG_LEVEL", mode="before")
