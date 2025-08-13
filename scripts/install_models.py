@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# scripts/install_models.py
 """
 Model Download and Installation Script for SD Multi-Modal Platform
 Downloads and sets up required AI models for Phase 3 implementation.
@@ -36,7 +37,7 @@ MODEL_CONFIGS = {
     "sdxl-base": {
         "repo_id": "stabilityai/stable-diffusion-xl-base-1.0",
         "pipeline_class": StableDiffusionXLPipeline,
-        "local_path": "models/stable-diffusion/sdxl/sdxl-base",
+        "local_path": "sdxl/sdxl-base",
         "vram_requirement": "8GB",
         "recommended_resolution": "1024x1024",
         "description": "High-quality photorealistic generation, best for commercial/advertising use",
@@ -44,7 +45,7 @@ MODEL_CONFIGS = {
     "sd-1.5": {
         "repo_id": "runwayml/stable-diffusion-v1-5",
         "pipeline_class": StableDiffusionPipeline,
-        "local_path": "models/stable-diffusion/sd-1.5",
+        "local_path": "stable-diffusion/sd-1.5",
         "vram_requirement": "4GB",
         "recommended_resolution": "512x512",
         "description": "Classic SD model, excellent LoRA ecosystem, anime/character generation",
@@ -52,7 +53,7 @@ MODEL_CONFIGS = {
     "sd-2.1": {
         "repo_id": "stabilityai/stable-diffusion-2-1",
         "pipeline_class": StableDiffusionPipeline,
-        "local_path": "models/stable-diffusion/sd-2.1",
+        "local_path": "stable-diffusion/sd-2.1",
         "vram_requirement": "6GB",
         "recommended_resolution": "768x768",
         "description": "Improved version of SD with better quality and composition",
@@ -221,52 +222,38 @@ class ModelInstaller:
 
 async def main():
     """Main installation script entry point."""
-    parser = argparse.ArgumentParser(
-        description="Install models for SD Multi-Modal Platform"
-    )
-    parser.add_argument(
-        "--models",
-        nargs="+",
-        choices=list(MODEL_CONFIGS.keys()) + ["all"],
-        default=["sdxl-base"],
-        help="Models to install (default: sdxl-base)",
-    )
-    parser.add_argument("--list", action="store_true", help="List available models")
-    parser.add_argument(
-        "--verify", action="store_true", help="Verify models after download"
-    )
-    parser.add_argument(
-        "--force", action="store_true", help="Force redownload even if model exists"
-    )
-    parser.add_argument(
-        "--check-requirements",
-        action="store_true",
-        help="Check system requirements only",
-    )
+    # parser = argparse.ArgumentParser(
+    #    description="Install models for SD Multi-Modal Platform"
+    # )
+    # parser.add_argument(
+    #    "--models",
+    #    nargs="+",
+    #    choices=list(MODEL_CONFIGS.keys()) + ["all"],
+    #    default=["sdxl-base"],
+    #    help="Models to install (default: sdxl-base)",
+    # )
+    # parser.add_argument("--list", action="store_true", help="List available models")
+    # parser.add_argument(
+    #    "--verify", action="store_true", help="Verify models after download"
+    # )
+    # parser.add_argument(
+    #    "--force", action="store_true", help="Force redownload even if model exists"
+    # )
+    # parser.add_argument(
+    #    "--check-requirements",
+    #    action="store_true",
+    #    help="Check system requirements only",
+    # )
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
     installer = ModelInstaller()
 
     # List models and exit
-    if args.list:
-        installer.list_available_models()
-        return
-
-    # Check requirements and exit
-    if args.check_requirements:
-        system_info = await installer.check_system_requirements()
-        print(f"\nSystem Requirements Check:")
-        print(f"CUDA Available: {system_info['cuda_available']}")
-        print(f"GPU: {system_info['gpu_name']}")
-        print(f"Total VRAM: {system_info['total_vram_gb']}GB")
-        print(f"PyTorch Version: {system_info['pytorch_version']}")
-        return
-
-    # Install models
-    models_to_install = args.models
-    if "all" in models_to_install:
-        models_to_install = list(MODEL_CONFIGS.keys())
+    # if args.list:
+    #    installer.list_available_models()
+    #    return
+    installer.list_available_models()
 
     # Check system first
     system_info = await installer.check_system_requirements()
@@ -274,9 +261,17 @@ async def main():
         logger.warning(
             "⚠️  CUDA not available but device set to 'cuda'. Consider using CPU mode."
         )
+    print(f"\nSystem Requirements Check:")
+    print(f"CUDA Available: {system_info['cuda_available']}")
+    print(f"GPU: {system_info['gpu_name']}")
+    print(f"Total VRAM: {system_info['total_vram_gb']}GB")
+    print(f"PyTorch Version: {system_info['pytorch_version']}")
+
+    # Install models
+    models_to_install = list(MODEL_CONFIGS.keys())
 
     # Install
-    results = await installer.install_models(models_to_install, verify=args.verify)
+    results = await installer.install_models(models_to_install, verify=True)
 
     # Print summary
     print(f"\n{'='*50}")
