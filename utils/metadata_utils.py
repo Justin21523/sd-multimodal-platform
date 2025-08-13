@@ -1,20 +1,69 @@
 # utils/metadata_utils.py
 """
 Metadata management utilities for SD Multi-Modal Platform.
-Handles generation metadata, JSON serialization, and metadata search/retrieval.
+Extended metadata utilities for generation tracking and analysis
 """
 import logging
 import json
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
-from .file_utils import ensure_directory
-from utils.logging_utils import setup_logging, get_request_logger
 
-# Set up logging
-setup_logging()
+from app.config import settings
+from utils.file_utils import ensure_directory, safe_filename
+
 logger = logging.getLogger(__name__)
+
+
+async def save_generation_metadata(
+    metadata: Dict[str, Any], task_id: str, subfolder: str = "txt2img"
+) -> Optional[Path]:
+    """
+    Save generation metadata to JSON file for reproducibility and analysis
+    """
+    try:
+        # Prepare metadata directory
+        metadata_dir = Path(settings.OUTPUT_PATH) / subfolder / "metadata"
+        ensure_directory(metadata_dir)
+
+        # Generate metadata filename
+        timestamp = int(time.time() * 1000)
+        filename = f"{task_id}_{timestamp}_metadata.json"
+        metadata_path = metadata_dir / filename
+
+        # Ensure metadata has required fields
+        enhanced_metadata = {
+            "version": "1.0",
+            "task_id": task_id,
+            "subfolder": subfolder,
+            "saved_at": time.time(),
+            **metadata,
+        }
+
+        # Add reproducibility information
+        if "seed" in metadata:
+            enhanced_metadata["reproducibility"] = {
+                "seed": metadata["seed"],
+                "model_used": metadata.get("model_used", "unknown"),
+                "generation_params": metadata.get("generation_params", {}),
+                "platform_info": {
+                    "device": settings.DEVICE,
+                    "torch_dtype": str(settings.get_torch_dtype()),
+                    "use_sdpa": settings.USE_SDPA,
+                },
+            }
+
+        # Save metadata
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(enhanced_metadata, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"💾 Saved metadata: {metadata_path}")
+        return metadata_path
+
+    except Exception as e:
+        logger.error(f"❌ Failed to save metadata: {str(e)}")
+        return None
 
 
 def save_metadata_json(metadata: Dict[str, Any], filepath: Path) -> bool:
@@ -76,72 +125,410 @@ def load_metadata_json(filepath: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def find_metadata_by_seed(metadata_dir: Path, seed: int) -> List[Path]:
-    """
-    Find metadata files by seed value.
-
-    Args:
-        metadata_dir: Directory to search for metadata files
-        seed: Seed value to search for
-
-    Returns:
-        List[Path]: List of metadata files containing the seed
-    """
-
-    metadata_dir = Path(metadata_dir)
-    matching_files = []
-
-    if not metadata_dir.exists():
-        return matching_files
-
+def load_generation_metadata(
+    metadata_path: Union[str, Path],
+) -> Optional[Dict[str, Any]]:
+    """Load generation metadata from JSON file"""
     try:
-        # Search for JSON files
-        for json_file in metadata_dir.glob("**/*_metadata.json"):
-            metadata = load_metadata_json(json_file)
-            if metadata and metadata.get("seed") == seed:
-                matching_files.append(json_file)
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        return metadata
+    except Exception as e:
+        logger.error(f"❌ Failed to load metadata from {metadata_path}: {str(e)}")
+        return None
+
+
+def find_metadata_by_task_id(
+    task_id: str, subfolder: Optional[str] = None
+) -> Optional[Path]:
+    """Find metadata file by task ID"""
+    try:
+        search_dirs = []
+
+        if subfolder:
+            search_dirs.append(Path(settings.OUTPUT_PATH) / subfolder / "metadata")
+        else:
+            # Search all subfolders
+            output_dir = Path(settings.OUTPUT_PATH)
+            for subdir in output_dir.iterdir():
+                if subdir.is_dir():
+                    metadata_dir = subdir / "metadata"
+                    if metadata_dir.exists():
+                        search_dirs.append(metadata_dir)
+
+        for metadata_dir in search_dirs:
+            for metadata_file in metadata_dir.glob(f"{task_id}_*_metadata.json"):
+                return metadata_file
+
+        return None
 
     except Exception as e:
-        logger.error(f"Error searching for seed {seed} in {metadata_dir}: {e}")
+        logger.error(f"❌ Failed to find metadata for task {task_id}: {str(e)}")
+        return None
 
-    return matching_files
 
-
-def get_recent_generations(metadata_dir: Path, limit: int = 10) -> List[Dict[str, Any]]:
-    """
-    Get recent generation records sorted by timestamp.
-
-    Args:
-        metadata_dir: Directory containing metadata files
-        limit: Maximum number of records to return
-
-    Returns:
-        List[dict]: List of metadata dictionaries sorted by timestamp (newest first)
-    """
-    metadata_dir = Path(metadata_dir)
-    generations = []
-
-    if not metadata_dir.exists():
-        return generations
-
+def find_metadata_by_seed(seed: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """Find metadata files by seed value for reproducibility"""
     try:
-        # Collect all metadata files
-        for json_file in metadata_dir.glob("**/*_metadata.json"):
-            metadata = load_metadata_json(json_file)
-            if metadata:
-                # Add file path for reference
-                metadata["metadata_file"] = str(json_file)
-                generations.append(metadata)
+        matching_metadata = []
+        output_dir = Path(settings.OUTPUT_PATH)
 
-        # Sort by timestamp (newest first)
-        generations.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        # Search all metadata files
+        for metadata_file in output_dir.rglob("*_metadata.json"):
+            try:
+                metadata = load_generation_metadata(metadata_file)
+                if metadata and metadata.get("seed") == seed:
+                    metadata["metadata_path"] = str(metadata_file)
+                    matching_metadata.append(metadata)
 
-        # Limit results
-        return generations[:limit]
+                    if len(matching_metadata) >= limit:
+                        break
+            except Exception:
+                continue
+
+        # Sort by creation time (newest first)
+        matching_metadata.sort(key=lambda x: x.get("saved_at", 0), reverse=True)
+        return matching_metadata
 
     except Exception as e:
-        logger.error(f"Error getting recent generations from {metadata_dir}: {e}")
+        logger.error(f"❌ Failed to find metadata by seed {seed}: {str(e)}")
         return []
+
+
+def get_recent_generations(
+    limit: int = 20, subfolder: Optional[str] = None, days: int = 7
+) -> List[Dict[str, Any]]:
+    """Get recent generation records"""
+    try:
+        recent_metadata = []
+        cutoff_time = time.time() - (days * 24 * 60 * 60)
+
+        search_dirs = []
+        if subfolder:
+            metadata_dir = Path(settings.OUTPUT_PATH) / subfolder / "metadata"
+            if metadata_dir.exists():
+                search_dirs.append(metadata_dir)
+        else:
+            # Search all subfolders
+            output_dir = Path(settings.OUTPUT_PATH)
+            for subdir in output_dir.iterdir():
+                if subdir.is_dir():
+                    metadata_dir = subdir / "metadata"
+                    if metadata_dir.exists():
+                        search_dirs.append(metadata_dir)
+
+        for metadata_dir in search_dirs:
+            for metadata_file in metadata_dir.glob("*_metadata.json"):
+                try:
+                    metadata = load_generation_metadata(metadata_file)
+                    if metadata and metadata.get("saved_at", 0) > cutoff_time:
+                        metadata["metadata_path"] = str(metadata_file)
+                        recent_metadata.append(metadata)
+                except Exception:
+                    continue
+
+        # Sort by creation time (newest first) and limit
+        recent_metadata.sort(key=lambda x: x.get("saved_at", 0), reverse=True)
+        return recent_metadata[:limit]
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get recent generations: {str(e)}")
+        return []
+
+
+def get_generation_statistics(days: int = 30) -> Dict[str, Any]:
+    """Get generation statistics for the specified period"""
+    try:
+        cutoff_time = time.time() - (days * 24 * 60 * 60)
+
+        stats = {
+            "total_generations": 0,
+            "by_subfolder": {},
+            "by_model": {},
+            "by_day": {},
+            "average_processing_time": 0,
+            "total_processing_time": 0,
+            "most_used_seeds": {},
+            "most_common_dimensions": {},
+            "period_days": days,
+        }
+
+        processing_times = []
+        output_dir = Path(settings.OUTPUT_PATH)
+
+        for metadata_file in output_dir.rglob("*_metadata.json"):
+            try:
+                metadata = load_generation_metadata(metadata_file)
+                if not metadata or metadata.get("saved_at", 0) < cutoff_time:
+                    continue
+
+                stats["total_generations"] += 1
+
+                # By subfolder
+                subfolder = metadata.get("subfolder", "unknown")
+                stats["by_subfolder"][subfolder] = (
+                    stats["by_subfolder"].get(subfolder, 0) + 1
+                )
+
+                # By model
+                model = metadata.get("model_used", "unknown")
+                stats["by_model"][model] = stats["by_model"].get(model, 0) + 1
+
+                # By day
+                day_key = time.strftime(
+                    "%Y-%m-%d", time.localtime(metadata.get("saved_at", 0))
+                )
+                stats["by_day"][day_key] = stats["by_day"].get(day_key, 0) + 1
+
+                # Processing times
+                processing_time = metadata.get("processing_time", 0)
+                if processing_time > 0:
+                    processing_times.append(processing_time)
+                    stats["total_processing_time"] += processing_time
+
+                # Seeds
+                seed = metadata.get("seed")
+                if seed is not None:
+                    stats["most_used_seeds"][str(seed)] = (
+                        stats["most_used_seeds"].get(str(seed), 0) + 1
+                    )
+
+                # Dimensions
+                params = metadata.get("generation_params", {})
+                width = params.get("width")
+                height = params.get("height")
+                if width and height:
+                    dimension_key = f"{width}x{height}"
+                    stats["most_common_dimensions"][dimension_key] = (
+                        stats["most_common_dimensions"].get(dimension_key, 0) + 1
+                    )
+
+            except Exception:
+                continue
+
+        # Calculate averages
+        if processing_times:
+            stats["average_processing_time"] = sum(processing_times) / len(
+                processing_times
+            )
+
+        # Sort dictionaries by count
+        for key in [
+            "by_subfolder",
+            "by_model",
+            "most_used_seeds",
+            "most_common_dimensions",
+        ]:
+            stats[key] = dict(
+                sorted(stats[key].items(), key=lambda x: x[1], reverse=True)
+            )
+
+        return stats
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get generation statistics: {str(e)}")
+        return {"error": str(e)}
+
+
+def export_metadata_to_csv(
+    output_file: Union[str, Path], subfolder: Optional[str] = None, days: int = 30
+) -> bool:
+    """Export metadata to CSV file for analysis"""
+    try:
+        import csv
+
+        cutoff_time = time.time() - (days * 24 * 60 * 60)
+        metadata_records = []
+
+        # Collect metadata
+        search_dirs = []
+        if subfolder:
+            metadata_dir = Path(settings.OUTPUT_PATH) / subfolder / "metadata"
+            if metadata_dir.exists():
+                search_dirs.append(metadata_dir)
+        else:
+            output_dir = Path(settings.OUTPUT_PATH)
+            for subdir in output_dir.iterdir():
+                if subdir.is_dir():
+                    metadata_dir = subdir / "metadata"
+                    if metadata_dir.exists():
+                        search_dirs.append(metadata_dir)
+
+        for metadata_dir in search_dirs:
+            for metadata_file in metadata_dir.glob("*_metadata.json"):
+                try:
+                    metadata = load_generation_metadata(metadata_file)
+                    if metadata and metadata.get("saved_at", 0) > cutoff_time:
+                        # Flatten metadata for CSV
+                        flattened = flatten_metadata_for_csv(metadata)
+                        metadata_records.append(flattened)
+                except Exception:
+                    continue
+
+        if not metadata_records:
+            logger.warning("No metadata found for CSV export")
+            return False
+
+        # Write CSV
+        output_path = Path(output_file)
+        ensure_directory(output_path.parent)
+
+        # Get all possible field names
+        all_fields = set()
+        for record in metadata_records:
+            all_fields.update(record.keys())
+
+        fieldnames = sorted(all_fields)
+
+        with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(metadata_records)
+
+        logger.info(
+            f"📊 Exported {len(metadata_records)} metadata records to {output_path}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Failed to export metadata to CSV: {str(e)}")
+        return False
+
+
+def flatten_metadata_for_csv(
+    metadata: Dict[str, Any], prefix: str = ""
+) -> Dict[str, Any]:
+    """Flatten nested metadata dictionary for CSV export"""
+    flattened = {}
+
+    for key, value in metadata.items():
+        new_key = f"{prefix}{key}" if prefix else key
+
+        if isinstance(value, dict):
+            # Recursively flatten nested dictionaries
+            flattened.update(flatten_metadata_for_csv(value, f"{new_key}_"))
+        elif isinstance(value, list):
+            # Convert lists to string representation
+            flattened[new_key] = json.dumps(value) if value else ""
+        elif isinstance(value, (str, int, float, bool)):
+            flattened[new_key] = value
+        else:
+            # Convert other types to string
+            flattened[new_key] = str(value)
+
+    return flattened
+
+
+def cleanup_old_metadata(days: int = 30) -> Dict[str, int]:
+    """Clean up old metadata files"""
+    try:
+        cutoff_time = time.time() - (days * 24 * 60 * 60)
+        deleted_count = 0
+        total_count = 0
+
+        output_dir = Path(settings.OUTPUT_PATH)
+
+        for metadata_file in output_dir.rglob("*_metadata.json"):
+            total_count += 1
+            try:
+                if metadata_file.stat().st_mtime < cutoff_time:
+                    metadata_file.unlink()
+                    deleted_count += 1
+                    logger.info(f"🗑️ Deleted old metadata: {metadata_file}")
+            except Exception as e:
+                logger.warning(f"Failed to delete metadata {metadata_file}: {e}")
+
+        return {
+            "total_metadata_files": total_count,
+            "deleted_files": deleted_count,
+            "kept_files": total_count - deleted_count,
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to cleanup metadata: {str(e)}")
+        return {"error": str(e)}  # type: ignore[return-value]
+
+
+def validate_metadata_integrity() -> Dict[str, Any]:
+    """Validate metadata file integrity and consistency"""
+    try:
+        results = {
+            "total_files": 0,
+            "valid_files": 0,
+            "corrupted_files": [],
+            "missing_fields": [],
+            "orphaned_metadata": [],
+        }
+
+        output_dir = Path(settings.OUTPUT_PATH)
+
+        for metadata_file in output_dir.rglob("*_metadata.json"):
+            results["total_files"] += 1
+
+            try:
+                metadata = load_generation_metadata(metadata_file)
+                if not metadata:
+                    results["corrupted_files"].append(str(metadata_file))
+                    continue
+
+                # Check required fields
+                required_fields = ["task_id", "saved_at", "version"]
+                missing = [field for field in required_fields if field not in metadata]
+                if missing:
+                    results["missing_fields"].append(
+                        {"file": str(metadata_file), "missing": missing}
+                    )
+
+                # Check if corresponding image files exist
+                task_id = metadata.get("task_id")
+                subfolder = metadata.get("subfolder", "unknown")
+                if task_id:
+                    image_dir = output_dir / subfolder
+                    image_files = list(image_dir.glob(f"{task_id}_*"))
+                    if not image_files:
+                        results["orphaned_metadata"].append(str(metadata_file))
+
+                results["valid_files"] += 1
+
+            except Exception as e:
+                results["corrupted_files"].append(str(metadata_file))
+                logger.warning(f"Corrupted metadata file {metadata_file}: {e}")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"❌ Failed to validate metadata integrity: {str(e)}")
+        return {"error": str(e)}
+
+
+def create_generation_report(days: int = 7) -> Dict[str, Any]:
+    """Create comprehensive generation report"""
+    try:
+        stats = get_generation_statistics(days)
+        recent_gens = get_recent_generations(limit=10, days=days)
+        integrity = validate_metadata_integrity()
+
+        return {
+            "report_generated_at": time.time(),
+            "period_days": days,
+            "statistics": stats,
+            "recent_generations": recent_gens,
+            "system_integrity": integrity,
+            "summary": {
+                "total_generations": stats.get("total_generations", 0),
+                "avg_processing_time": f"{stats.get('average_processing_time', 0):.2f}s",
+                "most_used_model": (
+                    list(stats.get("by_model", {}).keys())[0]
+                    if stats.get("by_model")
+                    else "none"
+                ),
+                "data_integrity": f"{integrity.get('valid_files', 0)}/{integrity.get('total_files', 0)} files valid",
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to create generation report: {str(e)}")
+        return {"error": str(e)}
 
 
 def search_metadata_by_prompt(
@@ -325,67 +712,3 @@ def create_generation_metadata(
         metadata.update(additional_data)
 
     return metadata
-
-
-def export_metadata_csv(
-    metadata_dir: Path, output_file: Path, limit: int = 1000
-) -> bool:
-    """
-    Export metadata to CSV format for analysis.
-
-    Args:
-        metadata_dir: Directory containing metadata files
-        output_file: Output CSV file path
-        limit: Maximum number of records to export
-
-    Returns:
-        bool: True if export successful
-    """
-    try:
-        import csv
-
-        metadata_dir = Path(metadata_dir)
-        output_file = Path(output_file)
-
-        # Ensure output directory exists
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # Collect metadata
-        records = get_recent_generations(metadata_dir, limit)
-
-        if not records:
-            logger.warning("No metadata records found for export")
-            return False
-
-        # Define CSV columns
-        columns = [
-            "timestamp",
-            "task_id",
-            "model_id",
-            "prompt",
-            "width",
-            "height",
-            "num_inference_steps",
-            "guidance_scale",
-            "seed",
-            "num_images",
-            "generation_time",
-            "vram_used_gb",
-        ]
-
-        # Write CSV
-        with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=columns)
-            writer.writeheader()
-
-            for record in records:
-                # Extract only the columns we want
-                row = {col: record.get(col, "") for col in columns}
-                writer.writerow(row)
-
-        logger.info(f"Exported {len(records)} metadata records to {output_file}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to export metadata to CSV: {e}")
-        return False
