@@ -1,7 +1,6 @@
 # app/config.py
 """
-Configuration management for SD Multi-Modal Platform Phase 3.
-Handles environment variables and system settings with Pydantic v2.
+Configuration management with Phase 5 queue and post-processing settings
 """
 
 
@@ -22,7 +21,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", case_sensitive=True, extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=True, extra="allow"
     )
 
     # API Configuration
@@ -34,12 +33,15 @@ class Settings(BaseSettings):
         description="CORS allowed origins (comma-separated)",
     )
 
-    # Logging Configuration
-    LOG_LEVEL: str = Field(default="INFO", description="Logging level")
-    LOG_FILE_PATH: str = Field(default="logs/app.log", description="Log file path")
-    ENABLE_REQUEST_LOGGING: bool = Field(
-        default=True, description="Enable request logging middleware"
+    # === Environment and Mode Settings ===
+    ENVIRONMENT: Literal["development", "staging", "production"] = Field(
+        default="development", description="Environment mode"
     )
+    MINIMAL_MODE: bool = Field(
+        default=False, description="Run in minimal mode without model loading"
+    )
+    DEBUG: bool = Field(default=True, description="Debug mode")
+    RELOAD: bool = True
 
     # Hardware Configuration - RTX 5080 (sm_120) Optimized
     DEVICE: str = Field(default="cuda", description="PyTorch device (cuda/cpu)")
@@ -67,14 +69,27 @@ class Settings(BaseSettings):
         default="sdxl-base", description="Primary model to load on startup"
     )
 
-    # Model paths
-    SD_MODEL_PATH: str = Field(default="./models/stable-diffusion")
-    SDXL_MODEL_PATH: str = Field(default="./models/sdxl")
-    CONTROLNET_PATH: str = Field(default="./models/controlnet")
-    LORA_PATH: str = Field(default="./models/lora")
-    VAE_PATH: str = Field(default="./models/vae")
-    UPSCALE_MODEL_PATH: str = Field(
+    # === Path Configuration ===
+    MODELS_PATH: str = Field(default="./models", description="Base models directory")
+    SD_MODEL_PATH: str = Field(
+        default="./models/stable-diffusion", description="SD models path"
+    )
+    SDXL_MODEL_PATH: str = Field(
+        default="./models/sdxl", description="SDXL models path"
+    )
+    CONTROLNET_PATH: str = Field(
+        default="./models/controlnet", description="ControlNet models path"
+    )
+    LORA_PATH: str = Field(default="./models/lora", description="LoRA models path")
+    VAE_PATH: str = Field(default="./models/vae", description="VAE models path")
+    OUTPUT_PATH: str = Field(default="./outputs", description="Generated outputs path")
+
+    # === Phase 5: Post-processing Paths ===
+    UPSCALE_MODELS_PATH: str = Field(
         default="./models/upscale", description="Upscale models directory"
+    )
+    FACE_RESTORE_MODELS_PATH: str = Field(
+        default="./models/face-restore", description="Face restoration models directory"
     )
 
     # Generation Defaults
@@ -93,16 +108,53 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT: int = Field(default=300, description="Request timeout in seconds")
     MAX_FILE_SIZE: str = Field(default="10MB")
 
-    # Storage Configuration
-    OUTPUT_PATH: Path = Field(
-        default=Path("./outputs"), description="Output files directory"
+    # === Phase 5: Queue Configuration ===
+    ENABLE_QUEUE: bool = Field(default=True, description="Enable task queue system")
+    REDIS_HOST: str = Field(default="localhost", description="Redis host")
+    REDIS_PORT: int = Field(default=6379, description="Redis port")
+    REDIS_DB: int = Field(default=0, description="Redis database number")
+    REDIS_PASSWORD: Optional[str] = Field(default=None, description="Redis password")
+
+    # === Celery Configuration ===
+    CELERY_BROKER_URL: str = Field(
+        default="redis://localhost:6379/0", description="Celery broker URL"
     )
-    ASSETS_PATH: Path = Field(default=Path("./assets"), description="Assets directory")
-    ENABLE_METADATA_LOGGING: bool = Field(
-        default=True, description="Enable metadata logging"
+    CELERY_RESULT_BACKEND: str = Field(
+        default="redis://localhost:6379/0", description="Celery result backend"
     )
-    KEEP_GENERATIONS_DAYS: int = Field(
-        default=7, description="Days to keep generated files"
+
+    # === Task Queue Settings ===
+    TASK_TIME_LIMIT: int = Field(default=3600, description="Task time limit in seconds")
+    TASK_SOFT_TIME_LIMIT: int = Field(
+        default=3300, description="Task soft time limit in seconds"
+    )
+    WORKER_MAX_TASKS: int = Field(
+        default=10, description="Max tasks per worker before restart"
+    )
+    TASK_RETENTION_HOURS: int = Field(
+        default=72, description="Task retention period in hours"
+    )
+
+    # === Phase 5: Post-processing Settings ===
+    ENABLE_POSTPROCESS: bool = Field(
+        default=True, description="Enable post-processing features"
+    )
+    POSTPROCESS_MAX_IMAGES: int = Field(
+        default=10, description="Max images per post-processing task"
+    )
+    UPSCALE_MAX_SCALE: int = Field(default=4, description="Maximum upscale factor")
+
+    # === Batch Processing Settings ===
+    BATCH_TIMEOUT: int = Field(
+        default=7200, description="Batch processing timeout in seconds"
+    )
+
+    # === Memory Management ===
+    VRAM_CLEANUP_THRESHOLD: float = Field(
+        default=0.8, description="VRAM usage threshold for cleanup"
+    )
+    AUTO_CLEANUP_MODELS: bool = Field(
+        default=True, description="Automatically unload models when needed"
     )
 
     # Security Configuration
@@ -117,16 +169,27 @@ class Settings(BaseSettings):
         default=True, description="Enable API rate limiting"
     )
 
-    # Monitoring
-    ENABLE_PROMETHEUS: bool = Field(default=False)
-    ENABLE_HEALTH_CHECKS: bool = Field(
-        default=True, description="Enable health check endpoints"
+    # === Logging and Monitoring ===
+    LOG_LEVEL: str = Field(default="INFO", description="Logging level")
+    LOG_FILE_PATH: str = Field(default="logs/app.log", description="Log file path")
+    ENABLE_REQUEST_LOGGING: bool = Field(
+        default=True, description="Enable request logging"
     )
-    SENTRY_DSN: str = Field(default="")
+    ENABLE_PROMETHEUS: bool = Field(
+        default=False, description="Enable Prometheus metrics"
+    )
+    SENTRY_DSN: Optional[str] = Field(
+        default=None, description="Sentry DSN for error tracking"
+    )
 
-    # Development settings
-    DEBUG: bool = True
-    RELOAD: bool = True
+    # Storage Configuration
+    ASSETS_PATH: Path = Field(default=Path("./assets"), description="Assets directory")
+    ENABLE_METADATA_LOGGING: bool = Field(
+        default=True, description="Enable metadata logging"
+    )
+    KEEP_GENERATIONS_DAYS: int = Field(
+        default=7, description="Days to keep generated files"
+    )
 
     # Model Download Settings
     HF_TOKEN: str = Field(default="")
@@ -192,6 +255,14 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_LEVEL must be one of {valid_levels}")
         return v.upper()
 
+    @field_validator("REDIS_HOST", mode="before")
+    @classmethod
+    def validate_redis_host(cls, v: str) -> str:
+        """Validate Redis host"""
+        if not v or v.strip() == "":
+            return "localhost"
+        return v.strip()
+
     @computed_field
     @property
     def allowed_origins_list(self) -> List[str]:
@@ -205,6 +276,20 @@ class Settings(BaseSettings):
             return origins
         return []
 
+    @computed_field
+    @property
+    def models_path_obj(self) -> Path:
+        """Get models path as Path object"""
+        return Path(self.MODELS_PATH)
+
+    @computed_field
+    @property
+    def redis_url(self) -> str:
+        """Construct Redis URL"""
+        if self.REDIS_PASSWORD:
+            return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
     def get_torch_dtype(self) -> torch.dtype:
         """Convert string dtype to PyTorch dtype."""
         dtype_mapping = {
@@ -215,35 +300,40 @@ class Settings(BaseSettings):
         return dtype_mapping[self.TORCH_DTYPE]
 
     def get_model_path(self, model_type: str = "primary") -> str:
-        """Get model path for specified type."""
-        if model_type == "primary":
-            if self.PRIMARY_MODEL == "sdxl-base":
-                return f"{self.SDXL_MODEL_PATH}/sdxl-base"
-            elif self.PRIMARY_MODEL in ["sd-1.5", "sd-2.1", "custom"]:
-                return f"{self.SD_MODEL_PATH}/{self.PRIMARY_MODEL}"
-        elif model_type == "controlnet":
-            return self.CONTROLNET_PATH
-        elif model_type == "lora":
-            return self.LORA_PATH
-        elif model_type == "vae":
-            return self.VAE_PATH
-
-        return self.SD_MODEL_PATH
+        """Get model path by type"""
+        path_map = {
+            "sd": self.SD_MODEL_PATH,
+            "sdxl": self.SDXL_MODEL_PATH,
+            "controlnet": self.CONTROLNET_PATH,
+            "lora": self.LORA_PATH,
+            "vae": self.VAE_PATH,
+            "upscale": self.UPSCALE_MODELS_PATH,
+            "face_restore": self.FACE_RESTORE_MODELS_PATH,
+        }
+        return path_map.get(model_type, self.SD_MODEL_PATH)
 
     def get_allowed_origins(self) -> List[str]:
         """Get CORS allowed origins as a list."""
         return self.allowed_origins_list
 
     def ensure_directories(self) -> None:
-        """Create necessary directories."""
+        """Create necessary directories"""
         directories = [
+            self.MODELS_PATH,
+            self.SD_MODEL_PATH,
+            self.SDXL_MODEL_PATH,
+            self.CONTROLNET_PATH,
+            self.LORA_PATH,
+            self.VAE_PATH,
+            self.UPSCALE_MODELS_PATH,
+            self.FACE_RESTORE_MODELS_PATH,
             self.OUTPUT_PATH,
             f"{self.OUTPUT_PATH}/txt2img",
             f"{self.OUTPUT_PATH}/img2img",
             f"{self.OUTPUT_PATH}/inpaint",
             f"{self.OUTPUT_PATH}/upscale",
-            Path(self.LOG_FILE_PATH).parent,
-            self.CACHE_DIR,
+            f"{self.OUTPUT_PATH}/face_restore",
+            f"{self.OUTPUT_PATH}/postprocess",
         ]
 
         for directory in directories:
@@ -258,6 +348,10 @@ class Settings(BaseSettings):
             "guidance_scale": self.DEFAULT_CFG,
             "sampler": self.DEFAULT_SAMPLER,
         }
+
+    def is_production(self) -> bool:
+        """Check if running in production environment"""
+        return self.ENVIRONMENT == "production"
 
     def is_development(self) -> bool:
         """Check if running in development mode."""
