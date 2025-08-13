@@ -28,7 +28,7 @@ import torch
 import platform
 
 from app.config import settings
-from app.api.v1 import txt2img, health
+from app.api.v1 import txt2img, health, img2img, assets
 from services.models.sd_models import get_model_manager
 from utils.logging_utils import setup_logging, get_request_logger
 
@@ -318,6 +318,9 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Include API routers
 app.include_router(health.router, prefix=settings.API_PREFIX)
 app.include_router(txt2img.router, prefix=settings.API_PREFIX)
+
+app.include_router(img2img.router, prefix=settings.API_PREFIX)
+app.include_router(assets.router, prefix=settings.API_PREFIX)
 
 
 # === Root and Info Endpoints ===

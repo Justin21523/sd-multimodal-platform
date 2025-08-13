@@ -1,7 +1,7 @@
 # services/models/sd_models.py
 """
 Complete Model Manager for SD Multi-Modal Platform Phase 3
-Handles model loading, switching, memory management, and pipeline abstraction.
+Extended Stable Diffusion model management with img2img, inpaint, and auto-selection
 """
 
 import logging
@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union, Tuple
 import torch
+from PIL import Image
+
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import (
     StableDiffusionXLPipelineOutput,
 )
@@ -22,18 +24,31 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import (
 from diffusers.schedulers.scheduling_dpmsolver_multistep import (
     DPMSolverMultistepScheduler,
 )
-from PIL import Image
+from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img import (
+    StableDiffusionImg2ImgPipeline,
+)
+from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl_img2img import (
+    StableDiffusionXLImg2ImgPipeline,
+)
+from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint import (
+    StableDiffusionInpaintPipeline,
+)
+from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl_inpaint import (
+    StableDiffusionXLInpaintPipeline,
+)
+from diffusers.pipelines.auto_pipeline import (
+    AutoPipelineForText2Image,
+    AutoPipelineForImage2Image,
+    AutoPipelineForInpainting,
+)
 
 from app.config import settings
 from services.generation.txt2img_service import Txt2ImgService
-from utils.logging_utils import setup_logging
-from utils.attention_utils import (
-    setup_attention_processor,
-    setup_pipeline_optimizations,
-)
+from utils.attention_utils import setup_attention_processor
+from utils.logging_utils import get_generation_logger
+from utils.image_utils import pil_image_to_base64
 
-# Set up logging
-setup_logging()
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,6 +95,48 @@ class ModelRegistry:
         },
     }
 
+    AVAILABLE_MODELS = {
+        "sdxl-base": {
+            "name": "Stable Diffusion XL Base",
+            "path": "stabilityai/stable-diffusion-xl-base-1.0",
+            "local_path": "sdxl/sdxl-base",
+            "type": "sdxl",
+            "capabilities": ["txt2img", "img2img", "inpaint"],
+            "strengths": ["photoreal", "high-quality", "commercial", "advertisement"],
+            "recommended_for": ["photography", "marketing", "professional"],
+            "vram_requirement": "12GB+",
+            "supports_inpaint": True,
+            "optimal_resolution": (1024, 1024),
+            "max_resolution": (2048, 2048),
+        },
+        "sd-1.5": {
+            "name": "Stable Diffusion 1.5",
+            "path": "runwayml/stable-diffusion-v1-5",
+            "local_path": "stable-diffusion/sd-1.5",
+            "type": "sd",
+            "capabilities": ["txt2img", "img2img", "inpaint"],
+            "strengths": ["anime", "character", "lora-compatible", "fast"],
+            "recommended_for": ["anime", "characters", "artistic", "creative"],
+            "vram_requirement": "6GB+",
+            "supports_inpaint": True,
+            "optimal_resolution": (512, 512),
+            "max_resolution": (1024, 1024),
+        },
+        "sd-2.1": {
+            "name": "Stable Diffusion 2.1",
+            "path": "stabilityai/stable-diffusion-2-1",
+            "local_path": "stable-diffusion/sd-2.1",
+            "type": "sd2",
+            "capabilities": ["txt2img", "img2img", "inpaint"],
+            "strengths": ["balanced", "versatile", "improved-quality"],
+            "recommended_for": ["general", "mixed", "experimental"],
+            "vram_requirement": "8GB+",
+            "supports_inpaint": True,
+            "optimal_resolution": (768, 768),
+            "max_resolution": (1024, 1024),
+        },
+    }
+
     @classmethod
     def get_model_info(cls, model_id: str) -> Optional[Dict[str, Any]]:
         """Get model configuration by ID."""
@@ -99,23 +156,124 @@ class ModelRegistry:
                 matching_models.append(model_id)
         return matching_models
 
+    @classmethod
+    def auto_select_model(cls, prompt: str, task_type: str = "txt2img") -> str:
+        """Auto-select best model based on prompt analysis and task type"""
+        prompt_lower = prompt.lower()
+
+        # Keywords for different model preferences
+        anime_keywords = [
+            "anime",
+            "manga",
+            "character",
+            "waifu",
+            "kawaii",
+            "chibi",
+            "2d",
+        ]
+        photoreal_keywords = [
+            "photo",
+            "realistic",
+            "portrait",
+            "photography",
+            "commercial",
+            "professional",
+        ]
+        artistic_keywords = ["art", "painting", "artistic", "creative", "illustration"]
+
+        # Count keyword matches
+        anime_score = sum(1 for keyword in anime_keywords if keyword in prompt_lower)
+        photoreal_score = sum(
+            1 for keyword in photoreal_keywords if keyword in prompt_lower
+        )
+        artistic_score = sum(
+            1 for keyword in artistic_keywords if keyword in prompt_lower
+        )
+
+        # Special considerations for inpainting
+        if task_type == "inpaint":
+            # SDXL generally better for inpainting
+            if photoreal_score > 0 or len(prompt) > 100:
+                return "sdxl-base"
+            elif anime_score > photoreal_score:
+                return "sd-1.5"
+            else:
+                return "sdxl-base"
+
+        # General selection logic
+        if anime_score > photoreal_score and anime_score > artistic_score:
+            return "sd-1.5"  # Best for anime/character
+        elif photoreal_score > 0 or len(prompt) > 150:
+            return "sdxl-base"  # Best for detailed/photoreal
+        elif artistic_score > 0:
+            return "sd-2.1"  # Balanced for artistic
+        else:
+            return settings.PRIMARY_MODEL  # Default fallback
+
+    @classmethod
+    def get_optimal_dimensions(cls, model_id: str) -> tuple:
+        """Get optimal dimensions for model"""
+        model_info = cls.get_model_info(model_id)
+        if model_info:
+            return model_info.get("optimal_resolution", (512, 512))
+        return (512, 512)
+
 
 class ModelManager:
-    """
-    Complete model management system for SD Multi-Modal Platform.
-    Handles loading, switching, memory management, and pipeline abstraction.
-    """
+    """Enhanced model manager with multi-pipeline support"""
+
+    _instance = None
+    _initialized = False
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(self):
-        self.is_initialized: bool = False
+        if self._initialized:
+            return
+        # Pipeline storage
         self.current_pipeline: Optional[
-            Union[StableDiffusionXLPipeline, StableDiffusionPipeline]
+            Union[StableDiffusionPipeline, StableDiffusionXLPipeline]
         ] = None
+        self.current_img2img_pipeline: Optional[
+            Union[StableDiffusionImg2ImgPipeline, StableDiffusionXLImg2ImgPipeline]
+        ] = None
+        self.current_inpaint_pipeline: Optional[
+            Union[StableDiffusionInpaintPipeline, StableDiffusionXLInpaintPipeline]
+        ] = None
+
+        # State tracking
         self.current_model_id: Optional[str] = None
+        self.current_model: Optional[str] = None
+        self.current_model_path: Optional[str] = None
+        self.is_initialized: bool = False
+        self.device: str = settings.DEVICE
+        self.torch_dtype = settings.get_torch_dtype()
         self.startup_time: float = 0.0
         self.last_optimization_info: Dict[str, Any] = {}
         self.model_cache: Dict[str, Any] = {}  # For future multi-model caching
         self.base_models_path = Path(settings.OUTPUT_PATH).parent / "models"
+
+        # Performance tracking
+        self.model_load_times: Dict[str, float] = {}
+        self.generation_stats: Dict[str, Any] = {
+            "total_generations": 0,
+            "avg_generation_time": 0,
+            "model_switches": 0,
+        }
+
+        self._initialized = True
+
+    @property
+    def available_models(self) -> Dict[str, Dict[str, Any]]:
+        """Get available models from registry"""
+        return ModelRegistry.AVAILABLE_MODELS
+
+    def auto_select_model(self, prompt: str, task_type: str = "txt2img") -> str:
+        """Auto-select model using registry logic"""
+        return ModelRegistry.auto_select_model(prompt, task_type)
 
     async def initialize(self, model_id: Optional[str] = None) -> bool:
         """
@@ -150,144 +308,134 @@ class ModelManager:
 
             # Load the model
             success = await self._load_model(target_model)
-            if not success:
-                return False
+            if success:
+                self.is_initialized = True
+                logger.info("✅ ModelManager initialized successfully")
+            else:
+                logger.error("❌ ModelManager initialization failed")
 
-            self.startup_time = time.time() - start_time
-            self.is_initialized = True
-
-            logger.info(
-                f"✅ ModelManager initialized successfully in {self.startup_time:.2f}s"
-            )
-            logger.info(f"Current model: {self.current_model_id}")
-            logger.info(f"Optimization info: {self.last_optimization_info}")
-
-            return True
+            return success
 
         except Exception as e:
             logger.error(f"❌ ModelManager initialization failed: {str(e)}")
             return False
 
     async def _load_model(self, model_id: str) -> bool:
-        """Load a specific model with optimizations."""
-        logger.info(f"Loading model: {model_id}")
-
+        """Load specific model with all pipeline variants"""
         try:
             model_info = ModelRegistry.get_model_info(model_id)
-            model_path = self.base_models_path / model_info["local_path"]  # type: ignore
-            pipeline_class = model_info["pipeline_class"]  # type: ignore
+            if not model_info:
+                raise ValueError(f"Unknown model: {model_id}")
 
-            # Unload current model if exists
-            if self.current_pipeline is not None:
-                await self._unload_current_model()
+            start_time = time.time()
+            model_path = model_info["path"]
+            model_type = model_info["type"]
 
-            # Load pipeline
-            logger.info(f"Loading pipeline from: {model_path}")
-            pipeline = pipeline_class.from_pretrained(
-                str(model_path),
-                torch_dtype=settings.get_torch_dtype(),
-                use_safetensors=True,
-                variant="fp16" if settings.TORCH_DTYPE == "float16" else None,
-            )
+            logger.info(f"🔄 Loading model: {model_id} ({model_type})")
 
-            # Move to device
-            pipeline = pipeline.to(settings.DEVICE)
+            # Unload current model first
+            await self._unload_current_model()
+
+            # Load pipelines based on model type
+            if model_type == "sdxl":
+                await self._load_sdxl_pipelines(model_path)
+            else:
+                await self._load_sd_pipelines(model_path)
 
             # Apply optimizations
-            optimization_info = self._apply_optimizations(pipeline)
+            self._apply_optimizations()
 
-            # Set optimized scheduler
-            pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
-                pipeline.scheduler.config
-            )
+            # Update state
+            self.current_model = model_id
+            self.current_model_path = model_path
+            load_time = time.time() - start_time
+            self.model_load_times[model_id] = load_time
 
-            # Store loaded pipeline
-            self.current_pipeline = pipeline
-            self.current_model_id = model_id
-            self.last_optimization_info = optimization_info
-
-            logger.info(f"✅ Model {model_id} loaded successfully")
+            logger.info(f"✅ Model loaded successfully: {model_id} ({load_time:.2f}s)")
             return True
 
         except Exception as e:
             logger.error(f"❌ Failed to load model {model_id}: {str(e)}")
+            await self._unload_current_model()
             return False
 
-    def _apply_optimizations(self, pipeline) -> Dict[str, Any]:
-        """Apply memory and performance optimizations to pipeline."""
-        optimization_config = {
-            "enable_xformers": settings.ENABLE_XFORMERS,
-            "use_sdpa": settings.USE_SDPA,
-            "enable_cpu_offload": settings.ENABLE_CPU_OFFLOAD,
-            "use_attention_slicing": settings.USE_ATTENTION_SLICING,
-            "enable_vae_slicing": True,  # Generally safe to enable
-            "enable_model_compilation": getattr(
-                settings, "ENABLE_MODEL_COMPILATION", False
-            ),
-        }
+    async def _load_sdxl_pipelines(self, model_path: str):
+        """Load SDXL pipeline variants"""
+        # Text-to-image pipeline
+        self.current_pipeline = StableDiffusionXLPipeline.from_pretrained(
+            model_path,
+            torch_dtype=self.torch_dtype,
+            device_map="auto" if self.device == "cuda" else None,
+            safety_checker=None,
+            requires_safety_checker=False,
+        ).to(self.device)
 
-        try:
-            # Use the comprehensive optimization function
-            optimization_results = setup_pipeline_optimizations(
-                pipeline, optimization_config
-            )
+        # Image-to-image pipeline (shared components)
+        self.current_img2img_pipeline = StableDiffusionXLImg2ImgPipeline(
+            vae=self.current_pipeline.vae,
+            text_encoder=self.current_pipeline.text_encoder,
+            text_encoder_2=self.current_pipeline.text_encoder_2,
+            tokenizer=self.current_pipeline.tokenizer,
+            tokenizer_2=self.current_pipeline.tokenizer_2,
+            unet=self.current_pipeline.unet,
+            scheduler=self.current_pipeline.scheduler,
+        )
 
-            logger.info(
-                f"Applied {optimization_results['total_optimizations']} optimizations"
-            )
-            if optimization_results.get("warnings"):
-                for warning in optimization_results["warnings"]:
-                    logger.warning(f"Optimization warning: {warning}")
+        # Inpainting pipeline (shared components)
+        self.current_inpaint_pipeline = StableDiffusionXLInpaintPipeline(
+            vae=self.current_pipeline.vae,
+            text_encoder=self.current_pipeline.text_encoder,
+            text_encoder_2=self.current_pipeline.text_encoder_2,
+            tokenizer=self.current_pipeline.tokenizer,
+            tokenizer_2=self.current_pipeline.tokenizer_2,
+            unet=self.current_pipeline.unet,
+            scheduler=self.current_pipeline.scheduler,
+        )
 
-            return optimization_results
+    async def _load_sd_pipelines(self, model_path: str):
+        """Load SD 1.5/2.1 pipeline variants"""
+        # Text-to-image pipeline
+        self.current_pipeline = StableDiffusionPipeline.from_pretrained(
+            model_path,
+            torch_dtype=self.torch_dtype,
+            device_map="auto" if self.device == "cuda" else None,
+            safety_checker=None,
+            requires_safety_checker=False,
+        ).to(self.device)
 
-        except Exception as e:
-            logger.warning(f"Some optimizations failed: {e}")
+        # Image-to-image pipeline (shared components)
+        self.current_img2img_pipeline = StableDiffusionImg2ImgPipeline(
+            feature_extractor=self.current_pipeline.feature_extractor,  # type: ignore
+            vae=self.current_pipeline.vae,
+            text_encoder=self.current_pipeline.text_encoder,
+            tokenizer=self.current_pipeline.tokenizer,
+            unet=self.current_pipeline.unet,
+            scheduler=self.current_pipeline.scheduler,
+            safety_checker=None,  # type: ignore
+            requires_safety_checker=False,
+        )
 
-            if hasattr(torch, "compile") and settings.ENABLE_MODEL_COMPILATION:
-                try:
-                    pipeline.unet = torch.compile(pipeline.unet, mode="reduce-overhead")
-                    optimization_info["compilation"] = True  # type: ignore
-                    logger.info("✅ Model compilation enabled")
-                except Exception as e:
-                    logger.warning(f"Model compilation failed: {e}")
-            return {
-                "attention_processor": "default",
-                "memory_optimizations": [],
-                "total_optimizations": 0,
-                "warnings": [f"Optimization setup failed: {e}"],
-            }
+    def _apply_optimizations(self):
+        """Apply performance optimizations to all pipelines"""
+        pipelines = [
+            self.current_pipeline,
+            self.current_img2img_pipeline,
+            self.current_inpaint_pipeline,
+        ]
 
-        return optimization_info
+        for pipeline in pipelines:
+            if pipeline is None:
+                continue
 
-    async def _unload_current_model(self) -> None:
-        """Safely unload current model and free memory."""
-        if self.current_pipeline is None:
-            return
+            # Apply attention optimization
+            setup_attention_processor(pipeline, force_sdpa=settings.USE_SDPA)
 
-        logger.info(f"Unloading model: {self.current_model_id}")
+            # Memory optimizations
+            if settings.ENABLE_CPU_OFFLOAD:
+                pipeline.enable_sequential_cpu_offload()
 
-        try:
-            # Move to CPU to free GPU memory
-            self.current_pipeline = self.current_pipeline.to("cpu")
-
-            # Clear references
-            del self.current_pipeline
-            self.current_pipeline = None
-            self.current_model_id = None
-
-            # Force garbage collection
-            gc.collect()
-
-            # Clear GPU cache
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
-            logger.info("✅ Model unloaded and memory cleared")
-
-        except Exception as e:
-            logger.error(f"Error during model unloading: {e}")
+            if settings.USE_ATTENTION_SLICING:
+                pipeline.enable_attention_slicing()
 
     async def switch_model(self, model_id: str) -> bool:
         """
@@ -318,11 +466,11 @@ class ModelManager:
         self,
         prompt: str,
         negative_prompt: str = "",
-        width: int = 0,
-        height: int = 0,
+        width: int = None,  # type: ignore
+        height: int = None,  # type: ignore
         num_inference_steps: int = 25,
         guidance_scale: float = 7.5,
-        seed: int = -1,
+        seed: int = None,  # type: ignore
         num_images: int = 1,
     ) -> Dict[str, Any]:
         """
@@ -341,121 +489,279 @@ class ModelManager:
         Returns:
             Dict containing generation results and metadata
         """
-        if not self.is_initialized or self.current_pipeline is None:
-            raise RuntimeError("ModelManager not initialized or no model loaded")
+        if not self.current_pipeline:
+            raise RuntimeError("No model loaded")
 
-        # Get model defaults if dimensions not specified
-        model_info = ModelRegistry.get_model_info(self.current_model_id)  # type: ignore
-        default_width, default_height = model_info["default_resolution"]  # type: ignore
-
-        width = width or default_width
-        height = height or default_height
-
-        # Set up generator for reproducibility
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(device=settings.DEVICE).manual_seed(seed)
-        else:
-            seed = torch.randint(0, 2**32 - 1, (1,)).item()
-            generator = torch.Generator(device=settings.DEVICE).manual_seed(seed)
-
-        generation_start = time.time()
-        logger.info(f"Generating image with {self.current_model_id}: {prompt[:100]}...")
+        gen_logger = get_generation_logger("txt2img", self.current_model)  # type: ignore
 
         try:
-            # Record initial VRAM usage
-            vram_before = 0
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                vram_before = torch.cuda.memory_allocated() / (1024**3)
+            # Use model's optimal dimensions if not specified
+            if width is None or height is None:
+                opt_width, opt_height = ModelRegistry.get_optimal_dimensions(
+                    self.current_model
+                )
+                width = width or opt_width
+                height = height or opt_height
 
-            # Generate images
-            result = self.current_pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                num_images_per_prompt=num_images,
-                return_dict=True,
-            )
-
-            # Extract images safely using existing utility
-            service = Txt2ImgService()
-            images = service._extract_images_from_result(result)
-
-            # Record final VRAM usage
-            vram_after = 0
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                vram_after = torch.cuda.memory_allocated() / (1024**3)
-
-            generation_time = time.time() - generation_start
-
-            generation_result = {
-                "images": images,
-                "metadata": {
-                    "model_id": self.current_model_id,
-                    "model_name": model_info["name"],  # type: ignore
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "width": width,
-                    "height": height,
-                    "num_inference_steps": num_inference_steps,
-                    "guidance_scale": guidance_scale,
-                    "seed": seed,
-                    "num_images": len(images),
-                    "generation_time": round(generation_time, 2),
-                    "vram_used_gb": round(vram_after, 2),
-                    "vram_delta_gb": round(vram_after - vram_before, 2),
-                    "optimization_info": self.last_optimization_info,
-                },
+            # Prepare generation parameters
+            generation_params = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "width": width,
+                "height": height,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "num_images_per_prompt": num_images,
             }
 
-            logger.info(f"✅ Generated {len(images)} images in {generation_time:.2f}s")
-            logger.info(
-                f"VRAM usage: {vram_after:.2f}GB (Δ{vram_after - vram_before:+.2f}GB)"
-            )
+            # Add seed if specified
+            if seed is not None and seed != -1:
+                generation_params["generator"] = torch.Generator(
+                    device=self.device
+                ).manual_seed(seed)
 
-            return generation_result
+            gen_logger.info(f"Starting txt2img generation: {width}x{height}")
+
+            # Generate
+            with torch.inference_mode():
+                result = self.current_pipeline(**generation_params)
+
+            # Extract images safely
+            images = self._extract_images_from_result(result)
+
+            gen_logger.info(f"✅ Generated {len(images)} images")
+
+            self.generation_stats["total_generations"] += len(images)
+
+            return {
+                "images": images,
+                "generation_params": generation_params,
+                "model_used": self.current_model,
+            }
 
         except Exception as e:
-            logger.error(f"❌ Image generation failed: {str(e)}")
+            gen_logger.error(f"❌ txt2img generation failed: {str(e)}")
+            raise
 
-            # Clear GPU cache on error
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    async def generate_img2img(
+        self,
+        prompt: str,
+        image: Image.Image,
+        negative_prompt: str = "",
+        strength: float = 0.75,
+        width: int = None,  # type: ignore
+        height: int = None,  # type: ignore
+        num_inference_steps: int = 25,
+        guidance_scale: float = 7.5,
+        seed: int = None,  # type: ignore
+        num_images: int = 1,
+    ) -> Dict[str, Any]:
+        """Generate images using image-to-image pipeline"""
+        if not self.current_img2img_pipeline:
+            raise RuntimeError("No img2img pipeline loaded")
 
-            raise RuntimeError(f"Image generation failed: {str(e)}")
+        gen_logger = get_generation_logger("img2img", self.current_model)  # type: ignore
 
-    def get_status(self) -> Dict[str, Any]:
-        """Get current model manager status."""
-        status = {
-            "is_initialized": self.is_initialized,
-            "current_model_id": self.current_model_id,
-            "startup_time": self.startup_time,
-            "optimization_info": self.last_optimization_info,
-            "available_models": ModelRegistry.list_models(),
-        }
-
-        # Add current model details
-        if self.current_model_id:
-            model_info = ModelRegistry.get_model_info(self.current_model_id)
-            status["current_model_info"] = model_info
-
-        # Add memory info
-        if torch.cuda.is_available():
-            status["vram_info"] = {
-                "allocated_gb": round(torch.cuda.memory_allocated() / (1024**3), 2),
-                "reserved_gb": round(torch.cuda.memory_reserved() / (1024**3), 2),
-                "total_gb": round(
-                    torch.cuda.get_device_properties(0).total_memory / (1024**3), 2
-                ),
+        try:
+            # Prepare generation parameters
+            generation_params = {
+                "prompt": prompt,
+                "image": image,
+                "negative_prompt": negative_prompt,
+                "strength": strength,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "num_images_per_prompt": num_images,
             }
 
-        return status
+            # Add dimensions if specified (for SDXL)
+            if width and height:
+                generation_params.update({"width": width, "height": height})
+
+            # Add seed if specified
+            if seed is not None and seed != -1:
+                generation_params["generator"] = torch.Generator(
+                    device=self.device
+                ).manual_seed(seed)
+
+            gen_logger.info(f"Starting img2img generation: strength={strength}")
+
+            # Generate
+            with torch.inference_mode():
+                result = self.current_img2img_pipeline(**generation_params)
+
+            # Extract images safely
+            images = self._extract_images_from_result(result)
+
+            gen_logger.info(f"✅ Generated {len(images)} images via img2img")
+
+            self.generation_stats["total_generations"] += len(images)
+
+            return {
+                "images": images,
+                "generation_params": generation_params,
+                "model_used": self.current_model,
+            }
+
+        except Exception as e:
+            gen_logger.error(f"❌ img2img generation failed: {str(e)}")
+            raise
+
+    async def generate_inpaint(
+        self,
+        prompt: str,
+        image: Image.Image,
+        mask_image: Image.Image,
+        negative_prompt: str = "",
+        strength: float = 0.75,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        num_inference_steps: int = 25,
+        guidance_scale: float = 7.5,
+        seed: Optional[int] = None,
+        num_images: int = 1,
+    ) -> Dict[str, Any]:
+        """Generate images using inpainting pipeline"""
+        if not self.current_inpaint_pipeline:
+            raise RuntimeError("No inpaint pipeline loaded")
+
+        gen_logger = get_generation_logger("inpaint", self.current_model)  # type: ignore
+
+        try:
+            # Prepare generation parameters
+            generation_params = {
+                "prompt": prompt,
+                "image": image,
+                "mask_image": mask_image,
+                "negative_prompt": negative_prompt,
+                "strength": strength,
+                "num_inference_steps": num_inference_steps,
+                "guidance_scale": guidance_scale,
+                "num_images_per_prompt": num_images,
+            }
+
+            # Add dimensions if specified (for SDXL)
+            if width and height:
+                generation_params.update({"width": width, "height": height})
+
+            # Add seed if specified
+            if seed is not None and seed != -1:
+                generation_params["generator"] = torch.Generator(
+                    device=self.device
+                ).manual_seed(seed)
+
+            gen_logger.info(f"Starting inpaint generation: strength={strength}")
+
+            # Generate
+            with torch.inference_mode():
+                result = self.current_inpaint_pipeline(**generation_params)
+
+            # Extract images safely
+            images = self._extract_images_from_result(result)
+
+            gen_logger.info(f"✅ Generated {len(images)} images via inpaint")
+
+            self.generation_stats["total_generations"] += len(images)
+
+            return {
+                "images": images,
+                "generation_params": generation_params,
+                "model_used": self.current_model,
+            }
+
+        except Exception as e:
+            gen_logger.error(f"❌ inpaint generation failed: {str(e)}")
+            raise
+
+    def _extract_images_from_result(self, result: Any) -> List[Image.Image]:
+        """Safely extract images from pipeline result"""
+        try:
+            # Handle different result types
+            if hasattr(result, "images") and result.images:
+                images = result.images
+            elif isinstance(result, list):
+                images = result
+            elif isinstance(result, Image.Image):
+                images = [result]
+            else:
+                raise ValueError(f"Unexpected result type: {type(result)}")
+
+            # Validate all items are PIL Images
+            validated_images = []
+            for i, img in enumerate(images):
+                if isinstance(img, Image.Image):
+                    validated_images.append(img)
+                else:
+                    logger.warning(f"Skipping non-PIL image at index {i}: {type(img)}")
+
+            if not validated_images:
+                raise ValueError("No valid PIL Images found in result")
+
+            return validated_images
+
+        except Exception as e:
+            logger.error(f"❌ Failed to extract images: {str(e)}")
+            raise
+
+    def get_vram_usage(self) -> str:
+        """Get current VRAM usage"""
+        try:
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved = torch.cuda.memory_reserved() / 1024**3
+                return f"{allocated:.2f}GB / {reserved:.2f}GB"
+            return "N/A (CPU mode)"
+        except Exception:
+            return "Unknown"
+
+    def get_model_status(self) -> Dict[str, Any]:
+        """Get current model status and statistics"""
+        return {
+            "current_model": self.current_model,
+            "current_model_path": self.current_model_path,
+            "is_initialized": self.is_initialized,
+            "device": self.device,
+            "vram_usage": self.get_vram_usage(),
+            "capabilities": {
+                "txt2img": self.current_pipeline is not None,
+                "img2img": self.current_img2img_pipeline is not None,
+                "inpaint": self.current_inpaint_pipeline is not None,
+            },
+            "load_times": self.model_load_times,
+            "generation_stats": self.generation_stats,
+            "available_models": list(self.available_models.keys()),
+        }
+
+    async def _unload_current_model(self):
+        """Unload current model to free memory"""
+        try:
+            pipelines = [
+                ("txt2img", self.current_pipeline),
+                ("img2img", self.current_img2img_pipeline),
+                ("inpaint", self.current_inpaint_pipeline),
+            ]
+
+            for name, pipeline in pipelines:
+                if pipeline is not None:
+                    pipeline = pipeline.to("cpu")
+                    del pipeline
+                    logger.info(f"🗑️ Unloaded {name} pipeline")
+
+            # Clear references
+            self.current_pipeline = None
+            self.current_img2img_pipeline = None
+            self.current_inpaint_pipeline = None
+
+            # Force memory cleanup
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+            logger.info("✅ Model unloaded and memory cleaned")
+
+        except Exception as e:
+            logger.error(f"❌ Error during model cleanup: {str(e)}")
 
     async def cleanup(self) -> None:
         """Clean up resources and unload models."""
@@ -464,10 +770,11 @@ class ModelManager:
         if self.current_pipeline is not None:
             await self._unload_current_model()
 
-        self.is_initialized = False
         self.model_cache.clear()
-
-        logger.info("✅ ModelManager cleanup completed")
+        self.current_model = None
+        self.current_model_path = None
+        self.is_initialized = False
+        logger.info("🧹 ModelManager cleanup completed")
 
 
 # Global model manager instance
