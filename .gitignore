@@ -38,9 +38,12 @@ venv.bak/
 
 # Model files (too large for git)
 models/stable-diffusion/
+models/sdxl/
 models/controlnet/
 models/lora/
 models/vae/
+models/upscale/
+
 *.ckpt
 *.safetensors
 *.bin
