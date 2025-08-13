@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# scripts/start_phase3.py
 """
 Phase 3 Startup and Validation Script
 Validates system requirements, models, and starts the application.

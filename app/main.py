@@ -16,6 +16,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Dict, Any
+import os
 
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
@@ -36,6 +37,9 @@ from utils.logging_utils import setup_logging, get_request_logger
 setup_logging()
 logger = logging.getLogger(__name__)
 
+# Check if running in minimal mode
+MINIMAL_MODE = os.getenv("MINIMAL_MODE", "false").lower() == "true"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,51 +48,75 @@ async def lifespan(app: FastAPI):
     startup_start = time.time()
     logger.info("🚀 Starting SD Multi-Modal Platform...")
 
+    if MINIMAL_MODE:
+        logger.info("🔧 Running in MINIMAL MODE - skipping model initialization")
+
     try:
         # Validate configuration
         logger.info("Validating configuration...")
         settings.ensure_directories()
 
-        # Initialize model manager
-        logger.info("Initializing model manager...")
-        model_manager = get_model_manager()
+        # Initialize model manager only if not in minimal mode
+        model_manager_ready = False
+        if not MINIMAL_MODE:
+            logger.info("Initializing model manager...")
+            model_manager = get_model_manager()
 
-        # Try to initialize with primary model
-        initialization_success = await model_manager.initialize()
+            # Try to initialize with primary model
+            try:
+                initialization_success = await model_manager.initialize()
 
-        if not initialization_success:
-            logger.warning("⚠️  Model manager initialization failed")
-            logger.warning(
-                "The API will start but txt2img endpoints will be unavailable"
-            )
-            logger.warning("Run 'python scripts/install_models.py' to download models")
+                if not initialization_success:
+                    logger.warning("⚠️  Model manager initialization failed")
+                    logger.warning(
+                        "The API will start but txt2img endpoints will be unavailable"
+                    )
+                    logger.warning(
+                        "Run 'python scripts/install_models.py' to download models"
+                    )
+                else:
+                    logger.info(
+                        f"✅ Model manager initialized with: {model_manager.current_model_id}"
+                    )
+                    model_manager_ready = True
+
+            except Exception as e:
+                logger.error(f"Model initialization error: {e}")
+                logger.warning("Continuing startup without model initialization...")
         else:
-            logger.info(
-                f"✅ Model manager initialized with: {model_manager.current_model_id}"
-            )
+            logger.info("✅ Model initialization skipped (minimal mode)")
 
         startup_time = time.time() - startup_start
-        logger.info(f"🎉 Application startup completed in {startup_time:.2f}s")
+        mode_info = "MINIMAL MODE" if MINIMAL_MODE else "FULL MODE"
+        logger.info(
+            f"🎉 Application startup completed in {startup_time:.2f}s ({mode_info})"
+        )
 
         # Store startup info for health checks
         app.state.startup_time = startup_time
-        app.state.model_manager_ready = initialization_success
+        app.state.model_manager_ready = model_manager_ready
+        app.state.minimal_mode = MINIMAL_MODE
 
         yield
 
     except Exception as e:
         logger.error(f"❌ Startup failed: {str(e)}")
-        raise
+        # Continue startup even if model init fails
+        app.state.startup_time = time.time() - startup_start
+        app.state.model_manager_ready = False
+        app.state.minimal_mode = MINIMAL_MODE
+        yield
 
     finally:
         # Cleanup on shutdown
         logger.info("🔄 Shutting down application...")
 
         try:
-            model_manager = get_model_manager()
-            if model_manager.is_initialized:
-                await model_manager.cleanup()
-                logger.info("✅ Model manager cleanup completed")
+            if not MINIMAL_MODE:
+                model_manager = get_model_manager()
+                if model_manager.is_initialized:
+                    await model_manager.cleanup()
+                    logger.info("✅ Model manager cleanup completed")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
@@ -158,6 +186,10 @@ async def request_logging_middleware(request: Request, call_next):
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = f"{process_time:.3f}"
 
+        # Add minimal mode header if applicable
+        if MINIMAL_MODE:
+            response.headers["X-Minimal-Mode"] = "true"
+
         # Log successful response
         req_logger.info(
             f"✅ Request completed",
@@ -197,6 +229,7 @@ async def request_logging_middleware(request: Request, call_next):
                 ),
                 "request_id": request_id,
                 "timestamp": time.time(),
+                "minimal_mode": MINIMAL_MODE,
             },
             headers={
                 "X-Request-ID": request_id,
@@ -231,6 +264,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "status_code": exc.status_code,
             "request_id": request_id,
             "timestamp": time.time(),
+            "minimal_mode": MINIMAL_MODE,
         },
         headers={"X:Request-ID": request_id},
     )
@@ -249,6 +283,7 @@ async def value_error_handler(request: Request, exc: ValueError):
             "status_code": 422,
             "request_id": request_id,
             "timestamp": time.time(),
+            "minimal_mode": MINIMAL_MODE,
         },
         headers={"X-Request-ID": request_id},
     )
@@ -274,6 +309,7 @@ async def general_exception_handler(request: Request, exc: Exception):
             "status_code": 500,
             "request_id": request_id,
             "timestamp": time.time(),
+            "minimal_mode": MINIMAL_MODE,
         },
         headers={"X-Request-ID": request_id},
     )
@@ -293,13 +329,22 @@ async def root():
         "service": "SD Multi-Modal Platform",
         "version": "1.0.0-phase3",
         "phase": "Phase 3: Model Management & Real Generation",
+        "mode": "minimal" if MINIMAL_MODE else "full",
         "api_docs": f"{settings.API_PREFIX}/docs",
         "health_check": f"{settings.API_PREFIX}/health",
         "status": "operational",
         "features": [
-            "Real text-to-image generation",
+            (
+                "Real text-to-image generation"
+                if not MINIMAL_MODE
+                else "API structure testing"
+            ),
             "Multiple model support (SDXL, SD1.5, SD2.1)",
-            "Model switching and management",
+            (
+                "Model switching and management"
+                if not MINIMAL_MODE
+                else "Model management (disabled)"
+            ),
             "RTX 5080 optimizations",
             "Memory management",
             "Request tracking",
@@ -314,7 +359,8 @@ async def api_info():
     """Get comprehensive API information."""
     model_manager = get_model_manager()
 
-    return {
+    # Basic info that works in minimal mode
+    info = {
         "api": {
             "prefix": settings.API_PREFIX,
             "version": "v1",
@@ -344,7 +390,27 @@ async def api_info():
             "attention_slicing": settings.USE_ATTENTION_SLICING,
             "cpu_offload": settings.ENABLE_CPU_OFFLOAD,
         },
+        "mode": {
+            "minimal_mode": MINIMAL_MODE,
+            "model_manager_ready": getattr(app.state, "model_manager_ready", False),
+        },
     }
+
+    # Add model manager info if available
+    if not MINIMAL_MODE:
+        try:
+            model_manager = get_model_manager()
+            info["model_manager"] = {
+                "initialized": model_manager.is_initialized,
+                "current_model": model_manager.current_model_id,
+                "startup_time": model_manager.startup_time,
+            }
+        except Exception as e:
+            info["model_manager"] = {"error": str(e), "initialized": False}
+    else:
+        info["model_manager"] = {"disabled": "Running in minimal mode"}
+
+    return info
 
 
 @app.get("/info")
@@ -375,6 +441,10 @@ async def server_info():
 
 
 if __name__ == "__main__":
+    # Check if minimal mode is requested
+    if "--minimal" in sys.argv:
+        os.environ["MINIMAL_MODE"] = "true"
+        print("🔧 Starting in MINIMAL MODE")
 
     # Development server
     uvicorn.run(
