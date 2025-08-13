@@ -148,25 +148,95 @@ SDXL_CONTROLNET_MODELS = {
     },
 }
 
-# Post-processing models
+# Post-processing models - FIXED repo_ids and file paths
 POSTPROCESS_MODELS = {
     "real-esrgan-x4": {
-        "repo_id": "ai-forever/Real-ESRGAN",
-        "files": ["RealESRGAN_x4plus.pth"],
+        "repo_id": "xinntao/Real-ESRGAN",
+        "files": ["experiments/pretrained_models/RealESRGAN_x4plus.pth"],
         "description": "4x upscaling for photos and art",
         "size_estimate": "64MB",
     },
     "real-esrgan-anime": {
-        "repo_id": "ai-forever/Real-ESRGAN",
-        "files": ["RealESRGAN_x4plus_anime_6B.pth"],
+        "repo_id": "xinntao/Real-ESRGAN",
+        "files": ["experiments/pretrained_models/RealESRGAN_x4plus_anime_6B.pth"],
         "description": "4x upscaling optimized for anime",
         "size_estimate": "18MB",
     },
+    "real-esrgan-x2": {
+        "repo_id": "xinntao/Real-ESRGAN",
+        "files": ["experiments/pretrained_models/RealESRGAN_x2plus.pth"],
+        "description": "2x upscaling for faster processing",
+        "size_estimate": "64MB",
+    },
     "gfpgan": {
         "repo_id": "TencentARC/GFPGAN",
-        "files": ["GFPGANv1.4.pth"],
+        "files": ["experiments/pretrained_models/GFPGANv1.4.pth"],
         "description": "Face restoration and enhancement",
         "size_estimate": "348MB",
+    },
+    "codeformer": {
+        "repo_id": "sczhou/CodeFormer",
+        "files": ["weights/CodeFormer/codeformer.pth"],
+        "description": "Advanced face restoration with fidelity control",
+        "size_estimate": "359MB",
+    },
+}
+
+# LoRA models collection - Popular and high-quality LoRAs
+LORA_MODELS = {
+    "detail-tweaker": {
+        "repo_id": "ostris/detail-tweaker-xl",
+        "description": "Detail enhancement LoRA for SDXL",
+        "size_estimate": "144MB",
+        "compatible_with": ["sdxl"],
+        "strength_range": "0.5-1.5",
+    },
+    "film-photography": {
+        "repo_id": "ostris/film-photography-xl",
+        "description": "Film photography style for SDXL",
+        "size_estimate": "144MB",
+        "compatible_with": ["sdxl"],
+        "strength_range": "0.8-1.2",
+    },
+    "anime-style-xl": {
+        "repo_id": "Linaqruf/anime-detailer-xl-lora",
+        "description": "Anime style enhancement for SDXL",
+        "size_estimate": "144MB",
+        "compatible_with": ["sdxl"],
+        "strength_range": "0.7-1.0",
+    },
+    "realistic-vision": {
+        "repo_id": "SG161222/Realistic_Vision_V6.0_B1_noVAE",
+        "description": "Realistic photography enhancement",
+        "size_estimate": "144MB",
+        "compatible_with": ["sd-1.5"],
+        "strength_range": "0.8-1.0",
+    },
+}
+
+# VAE models for improved image quality
+VAE_MODELS = {
+    "sdxl-vae": {
+        "repo_id": "madebyollin/sdxl-vae-fp16-fix",
+        "description": "Fixed SDXL VAE for better image quality",
+        "size_estimate": "335MB",
+        "compatible_with": ["sdxl"],
+        "recommended": True,
+    },
+    "vae-ft-mse": {
+        "repo_id": "stabilityai/sd-vae-ft-mse-original",
+        "description": "Improved VAE for SD 1.5 with better colors",
+        "size_estimate": "335MB",
+        "compatible_with": ["sd-1.5", "sd-2.1"],
+        "recommended": True,
+    },
+    "anime-vae": {
+        "repo_id": "hakurei/waifu-diffusion-v1-4",
+        "files": ["vae/kl-f8-anime2.ckpt"],
+        "description": "VAE optimized for anime generation",
+        "size_estimate": "335MB",
+        "compatible_with": ["sd-1.5"],
+        "recommended": False,
     },
 }
 
@@ -179,38 +249,116 @@ class ModelInstaller:
         self.base_path.mkdir(parents=True, exist_ok=True)
         self.downloaded_models = []
         self.failed_downloads = []
+        self.skipped_models = []
         self.total_size_downloaded = 0
         setup_logging()
 
-    async def check_system_requirements(self) -> Dict[str, Any]:
-        """Check system compatibility and requirements."""
-        logger.info("Checking system requirements...")
-
-        # Check CUDA availability
-        cuda_available = torch.cuda.is_available()
-        if cuda_available:
-            gpu_name = torch.cuda.get_device_name(0)
-            total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    def check_model_exists(self, model_id: str, model_type: str) -> bool:
+        """Check if model already exists locally"""
+        if model_type == "base":
+            target_dir = self.base_path / "stable-diffusion" / model_id
+        elif model_type == "controlnet":
+            target_dir = self.base_path / "controlnet" / "sd" / model_id
+        elif model_type == "controlnet_sdxl":
+            target_dir = self.base_path / "controlnet" / "sdxl" / model_id
+        elif model_type == "lora":
+            target_dir = self.base_path / "lora" / model_id
+        elif model_type == "vae":
+            target_dir = self.base_path / "vae" / model_id
+        elif model_type == "postprocess":
+            if "esrgan" in model_id:
+                target_dir = self.base_path / "upscale" / "real-esrgan"
+            elif "gfpgan" in model_id or "codeformer" in model_id:
+                target_dir = self.base_path / "face-restore" / model_id
+            else:
+                target_dir = self.base_path / "postprocess" / model_id
         else:
-            gpu_name = "CPU"
-            total_vram = 0
+            return False
 
-        system_info = {
-            "cuda_available": cuda_available,
-            "gpu_name": gpu_name,
-            "total_vram_gb": round(total_vram, 1),
-            "pytorch_version": torch.__version__,
-            "device": settings.DEVICE,
-        }
+        # Check if directory exists and has files
+        if target_dir.exists():
+            files = list(target_dir.rglob("*"))
+            model_files = [
+                f
+                for f in files
+                if f.is_file() and f.suffix in [".pth", ".ckpt", ".safetensors", ".bin"]
+            ]
+            return len(model_files) > 0
 
-        logger.info(f"System info: {system_info}")
-        return system_info
+        return False
+
+    def verify_model_integrity(self, model_path: Path, model_type: str) -> bool:
+        """Verify downloaded model integrity"""
+        try:
+            if not model_path.exists():
+                return False
+
+            # Check for key model files based on type
+            if model_type == "base":
+                # Check for essential model files
+                required_files = ["model_index.json"]
+                optional_files = [
+                    "unet/diffusion_pytorch_model.safetensors",
+                    "text_encoder/pytorch_model.bin",
+                ]
+            elif model_type in ["controlnet", "controlnet_sdxl"]:
+                required_files = ["config.json"]
+                optional_files = [
+                    "diffusion_pytorch_model.safetensors",
+                    "diffusion_pytorch_model.bin",
+                ]
+            elif model_type in ["postprocess", "lora", "vae"]:
+                # For single file models, just check if any model file exists
+                model_files = (
+                    list(model_path.rglob("*.pth"))
+                    + list(model_path.rglob("*.ckpt"))
+                    + list(model_path.rglob("*.safetensors"))
+                )
+                return len(model_files) > 0
+            else:
+                return True
+
+            # Check required files
+            for req_file in required_files:
+                if not (model_path / req_file).exists():
+                    logger.warning(f"Missing required file: {req_file}")
+                    return False
+
+            # Check for at least one optional file (model weights)
+            found_model_file = False
+            for opt_file in optional_files:
+                if (model_path / opt_file).exists():
+                    found_model_file = True
+                    break
+
+            if not found_model_file:
+                # Try to find any model file
+                model_files = (
+                    list(model_path.rglob("*.safetensors"))
+                    + list(model_path.rglob("*.bin"))
+                    + list(model_path.rglob("*.pth"))
+                )
+                found_model_file = len(model_files) > 0
+
+            return found_model_file
+
+        except Exception as e:
+            logger.error(f"Error verifying model {model_path}: {str(e)}")
+            return False
 
     async def install_base_model(self, model_id: str) -> bool:
-        """Install a base Stable Diffusion model"""
+        """Install a base Stable Diffusion model with verification"""
         if model_id not in BASE_MODELS:
             logger.error(f"Unknown base model: {model_id}")
             return False
+
+        # Check if already exists
+        if self.check_model_exists(model_id, "base"):
+            logger.info(f"✅ Base model {model_id} already exists, skipping")
+            self.skipped_models.append(
+                {"model_id": model_id, "type": "base", "reason": "already_exists"}
+            )
+            return True
 
         model_config = BASE_MODELS[model_id]
         repo_id = model_config["repo_id"]
@@ -235,6 +383,11 @@ class ModelInstaller:
             )
 
             download_time = time.time() - start_time
+
+            # Verify installation
+            if not self.verify_model_integrity(target_dir, "base"):
+                raise ValueError("Model verification failed - missing essential files")
+
             actual_size = get_directory_size(target_dir)
 
             logger.info(f"✅ Downloaded {model_id} in {download_time:.1f}s")
@@ -261,19 +414,33 @@ class ModelInstaller:
     async def install_controlnet_model(
         self, controlnet_id: str, for_sdxl: bool = False
     ) -> bool:
-        """Install a ControlNet model"""
+        """Install a ControlNet model with verification"""
         if for_sdxl:
             if controlnet_id not in SDXL_CONTROLNET_MODELS:
                 logger.error(f"Unknown SDXL ControlNet: {controlnet_id}")
                 return False
             model_config = SDXL_CONTROLNET_MODELS[controlnet_id]
             target_dir = self.base_path / "controlnet" / "sdxl" / controlnet_id
+            model_type = "controlnet_sdxl"
         else:
             if controlnet_id not in CONTROLNET_MODELS:
                 logger.error(f"Unknown ControlNet: {controlnet_id}")
                 return False
             model_config = CONTROLNET_MODELS[controlnet_id]
             target_dir = self.base_path / "controlnet" / "sd" / controlnet_id
+            model_type = "controlnet"
+
+        # Check if already exists
+        if self.check_model_exists(controlnet_id, model_type):
+            logger.info(f"✅ ControlNet {controlnet_id} already exists, skipping")
+            self.skipped_models.append(
+                {
+                    "model_id": controlnet_id,
+                    "type": model_type,
+                    "reason": "already_exists",
+                }
+            )
+            return True
 
         repo_id = model_config["repo_id"]
 
@@ -293,6 +460,11 @@ class ModelInstaller:
             )
 
             download_time = time.time() - start_time
+
+            # Verify installation
+            if not self.verify_model_integrity(target_dir, model_type):
+                raise ValueError("Model verification failed")
+
             actual_size = get_directory_size(target_dir)
 
             logger.info(
@@ -302,7 +474,7 @@ class ModelInstaller:
             self.downloaded_models.append(
                 {
                     "model_id": controlnet_id,
-                    "type": "controlnet_sdxl" if for_sdxl else "controlnet",
+                    "type": model_type,
                     "path": str(target_dir),
                     "size_bytes": actual_size,
                     "download_time": download_time,
@@ -388,6 +560,140 @@ class ModelInstaller:
             self.failed_downloads.append({"model_id": model_id, "error": str(e)})
             return False
 
+    async def install_lora_model(self, lora_id: str) -> bool:
+        """Install a LoRA model"""
+        if lora_id not in LORA_MODELS:
+            logger.error(f"Unknown LoRA model: {lora_id}")
+            return False
+
+        # Check if already exists
+        if self.check_model_exists(lora_id, "lora"):
+            logger.info(f"✅ LoRA {lora_id} already exists, skipping")
+            self.skipped_models.append(
+                {"model_id": lora_id, "type": "lora", "reason": "already_exists"}
+            )
+            return True
+
+        model_config = LORA_MODELS[lora_id]
+        repo_id = model_config["repo_id"]
+        target_dir = self.base_path / "lora" / lora_id
+
+        logger.info(f"📥 Installing LoRA: {lora_id}")
+        logger.info(f"   Repository: {repo_id}")
+        logger.info(f"   Target: {target_dir}")
+
+        try:
+            start_time = time.time()
+
+            downloaded_path = snapshot_download(
+                repo_id=repo_id,
+                local_dir=target_dir,
+                local_dir_use_symlinks=False,
+                resume_download=True,
+            )
+
+            download_time = time.time() - start_time
+
+            # Verify installation
+            if not self.verify_model_integrity(target_dir, "lora"):
+                raise ValueError("Model verification failed")
+
+            actual_size = get_directory_size(target_dir)
+
+            logger.info(f"✅ Downloaded LoRA {lora_id} in {download_time:.1f}s")
+
+            self.downloaded_models.append(
+                {
+                    "model_id": lora_id,
+                    "type": "lora",
+                    "path": str(target_dir),
+                    "size_bytes": actual_size,
+                    "download_time": download_time,
+                }
+            )
+            self.total_size_downloaded += actual_size
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to download LoRA {lora_id}: {str(e)}")
+            self.failed_downloads.append({"model_id": lora_id, "error": str(e)})
+            return False
+
+    async def install_vae_model(self, vae_id: str) -> bool:
+        """Install a VAE model"""
+        if vae_id not in VAE_MODELS:
+            logger.error(f"Unknown VAE model: {vae_id}")
+            return False
+
+        # Check if already exists
+        if self.check_model_exists(vae_id, "vae"):
+            logger.info(f"✅ VAE {vae_id} already exists, skipping")
+            self.skipped_models.append(
+                {"model_id": vae_id, "type": "vae", "reason": "already_exists"}
+            )
+            return True
+
+        model_config = VAE_MODELS[vae_id]
+        repo_id = model_config["repo_id"]
+        target_dir = self.base_path / "vae" / vae_id
+
+        logger.info(f"📥 Installing VAE: {vae_id}")
+        logger.info(f"   Repository: {repo_id}")
+        logger.info(f"   Target: {target_dir}")
+
+        try:
+            start_time = time.time()
+
+            # Handle specific files if specified
+            files = model_config.get("files")
+            if files:
+                ensure_directory(target_dir)
+                total_size = 0
+
+                for filename in files:
+                    file_path = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=target_dir,
+                        local_dir_use_symlinks=False,
+                    )
+                    total_size += get_file_size(file_path)
+            else:
+                downloaded_path = snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=target_dir,
+                    local_dir_use_symlinks=False,
+                    resume_download=True,
+                )
+                total_size = get_directory_size(target_dir)
+
+            download_time = time.time() - start_time
+
+            # Verify installation
+            if not self.verify_model_integrity(target_dir, "vae"):
+                raise ValueError("Model verification failed")
+
+            logger.info(f"✅ Downloaded VAE {vae_id} in {download_time:.1f}s")
+
+            self.downloaded_models.append(
+                {
+                    "model_id": vae_id,
+                    "type": "vae",
+                    "path": str(target_dir),
+                    "size_bytes": total_size,
+                    "download_time": download_time,
+                }
+            )
+            self.total_size_downloaded += total_size
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to download VAE {vae_id}: {str(e)}")
+            self.failed_downloads.append({"model_id": vae_id, "error": str(e)})
+            return False
+
     def create_directory_structure(self):
         """Create necessary directory structure"""
         directories = [
@@ -428,133 +734,6 @@ class ModelInstaller:
         print(f"\n📊 Total downloaded: {total_gb:.2f}GB")
         print(f"📁 Models location: {self.base_path}")
 
-    # old phase 3 download function
-    async def download_model(
-        self, model_name: str, force_redownload: bool = False
-    ) -> bool:
-        """Download a specific model with progress tracking."""
-        if model_name not in MODEL_CONFIGS:
-            logger.error(f"Unknown model: {model_name}")
-            return False
-
-        config = MODEL_CONFIGS[model_name]
-        local_path = self.base_path / config["local_path"]
-
-        # Check if already exists
-        if local_path.exists() and not force_redownload:
-            logger.info(f"Model {model_name} already exists at {local_path}")
-            return True
-
-        logger.info(f"Downloading {model_name} from {config['repo_id']}...")
-        logger.info(f"Target path: {local_path}")
-        logger.info(f"VRAM requirement: {config['vram_requirement']}")
-
-        try:
-            # Create target directory
-            local_path.mkdir(parents=True, exist_ok=True)
-
-            # Download model
-            snapshot_download(
-                repo_id=config["repo_id"],
-                local_dir=str(local_path),
-                local_dir_use_symlinks=False,
-                resume_download=True,
-            )
-
-            logger.info(f"✅ Successfully downloaded {model_name}")
-            return True
-
-        except Exception as e:
-            logger.error(f"❌ Failed to download {model_name}: {str(e)}")
-            return False
-
-    async def verify_model(self, model_name: str) -> bool:
-        """Verify model integrity and loadability."""
-        if model_name not in MODEL_CONFIGS:
-            return False
-
-        config = MODEL_CONFIGS[model_name]
-        local_path = self.base_path / config["local_path"]
-
-        if not local_path.exists():
-            logger.error(f"Model path does not exist: {local_path}")
-            return False
-
-        logger.info(f"Verifying {model_name}...")
-
-        try:
-            # Try to load pipeline
-            pipeline_class = config["pipeline_class"]
-            pipeline = pipeline_class.from_pretrained(
-                str(local_path),
-                torch_dtype=(
-                    torch.float16 if settings.DEVICE == "cuda" else torch.float32
-                ),
-                use_safetensors=True,
-            )
-
-            # Basic validation
-            if hasattr(pipeline, "unet") and hasattr(pipeline, "vae"):
-                logger.info(f"✅ Model {model_name} verification passed")
-                del pipeline  # Free memory
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                return True
-            else:
-                logger.error(f"❌ Model {model_name} missing required components")
-                return False
-
-        except Exception as e:
-            logger.error(f"❌ Model {model_name} verification failed: {str(e)}")
-            return False
-
-    async def install_models(
-        self, models: List[str], verify: bool = True
-    ) -> Dict[str, bool]:
-        """Install multiple models with verification."""
-        results = {}
-
-        logger.info(f"Installing models: {models}")
-
-        for model_name in models:
-            logger.info(f"\n{'='*50}")
-            logger.info(f"Processing model: {model_name}")
-            logger.info(f"{'='*50}")
-
-            # Download
-            download_success = await self.download_model(model_name)
-            if not download_success:
-                results[model_name] = False
-                continue
-
-            # Verify if requested
-            if verify:
-                verify_success = await self.verify_model(model_name)
-                results[model_name] = verify_success
-            else:
-                results[model_name] = True
-
-        return results
-
-    def list_available_models(self) -> None:
-        """Print available models and their info."""
-        print("\n" + "=" * 80)
-        print("AVAILABLE MODELS FOR SD MULTI-MODAL PLATFORM")
-        print("=" * 80)
-
-        for model_name, config in MODEL_CONFIGS.items():
-            print(f"\n🤖 {model_name.upper()}")
-            print(f"   Repository: {config['repo_id']}")
-            print(f"   VRAM Requirement: {config['vram_requirement']}")
-            print(f"   Recommended Resolution: {config['recommended_resolution']}")
-            print(f"   Description: {config['description']}")
-
-            # Check if installed
-            local_path = self.base_path / config["local_path"]
-            status = "✅ INSTALLED" if local_path.exists() else "❌ NOT INSTALLED"
-            print(f"   Status: {status}")
-
-        print("\n" + "=" * 80)
-
 
 async def main():
     """Main installation function"""
@@ -571,7 +750,6 @@ Examples:
   python scripts/install_models.py --minimal
         """,
     )
-
     # Model selection arguments
     parser.add_argument(
         "--base",
@@ -627,6 +805,11 @@ Examples:
         action="store_true",
         help="Show what would be downloaded without downloading",
     )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Only verify existing models without downloading",
+    )
 
     args = parser.parse_args()
 
@@ -645,32 +828,46 @@ Examples:
     installer = ModelInstaller()
     installer.create_directory_structure()
 
+    if args.verify_only:
+        print("🔍 VERIFICATION MODE - Checking existing models...")
+        verify_existing_models(installer)
+        return
+
     # Determine what to install
     base_models = []
     controlnet_models = []
     controlnet_sdxl_models = []
     postprocess_models = []
+    lora_models = []
+    vae_models = []
 
     if args.all:
         base_models = list(BASE_MODELS.keys())
         controlnet_models = list(CONTROLNET_MODELS.keys())
         controlnet_sdxl_models = list(SDXL_CONTROLNET_MODELS.keys())
         postprocess_models = list(POSTPROCESS_MODELS.keys())
+        lora_models = list(LORA_MODELS.keys())
+        vae_models = list(VAE_MODELS.keys())
     elif args.minimal:
         base_models = ["sdxl-base"]
         controlnet_models = ["canny", "openpose"]
         postprocess_models = ["real-esrgan-x4"]
+        vae_models = ["sdxl-vae"]
     elif args.recommended:
         base_models = ["sdxl-base", "sd-1.5"]
         controlnet_models = ["canny", "openpose", "depth"]
         controlnet_sdxl_models = ["canny-sdxl", "openpose-sdxl"]
         postprocess_models = ["real-esrgan-x4", "real-esrgan-anime", "gfpgan"]
+        lora_models = ["detail-tweaker", "anime-style-xl"]
+        vae_models = ["sdxl-vae", "vae-ft-mse"]
     else:
         # Use individual arguments
         base_models = args.base or []
         controlnet_models = args.controlnet or []
         controlnet_sdxl_models = args.controlnet_sdxl or []
         postprocess_models = args.postprocess or []
+        lora_models = args.lora or []
+        vae_models = args.vae or []
 
     # Validate that something was requested
     total_models = (
@@ -678,6 +875,8 @@ Examples:
         + len(controlnet_models)
         + len(controlnet_sdxl_models)
         + len(postprocess_models)
+        + len(lora_models)
+        + len(vae_models)
     )
     if total_models == 0:
         print("❌ No models specified for installation.")
@@ -701,10 +900,19 @@ Examples:
         print(
             f"Post-process ({len(postprocess_models)}): {', '.join(postprocess_models)}"
         )
+    if lora_models:
+        print(f"LoRA Models ({len(lora_models)}): {', '.join(lora_models)}")
+    if vae_models:
+        print(f"VAE Models ({len(vae_models)}): {', '.join(vae_models)}")
 
     # Calculate estimated space
     estimated_space = calculate_estimated_space(
-        base_models, controlnet_models, controlnet_sdxl_models, postprocess_models
+        base_models,
+        controlnet_models,
+        controlnet_sdxl_models,
+        postprocess_models,
+        lora_models,
+        vae_models,
     )
     print(f"\n💾 Estimated download size: {estimated_space:.1f}GB")
 
@@ -725,33 +933,36 @@ Examples:
     print("\n🚀 Starting model installation...")
     start_time = time.time()
 
-    # Install base models
-    for model_id in base_models:
-        print(f"\n📦 Installing base model: {model_id}")
-        success = await installer.install_base_model(model_id)
-        if not success:
-            print(f"⚠️  Continuing despite failure...")
+    # Install models in order
+    model_groups = [
+        ("base models", base_models, installer.install_base_model),
+        (
+            "ControlNet models",
+            controlnet_models,
+            lambda x: installer.install_controlnet_model(x, False),
+        ),
+        (
+            "SDXL ControlNet models",
+            controlnet_sdxl_models,
+            lambda x: installer.install_controlnet_model(x, True),
+        ),
+        ("VAE models", vae_models, installer.install_vae_model),
+        ("LoRA models", lora_models, installer.install_lora_model),
+        (
+            "post-processing models",
+            postprocess_models,
+            installer.install_postprocess_model,
+        ),
+    ]
 
-    # Install ControlNet models
-    for model_id in controlnet_models:
-        print(f"\n📦 Installing ControlNet: {model_id}")
-        success = await installer.install_controlnet_model(model_id, for_sdxl=False)
-        if not success:
-            print(f"⚠️  Continuing despite failure...")
-
-    # Install SDXL ControlNet models
-    for model_id in controlnet_sdxl_models:
-        print(f"\n📦 Installing SDXL ControlNet: {model_id}")
-        success = await installer.install_controlnet_model(model_id, for_sdxl=True)
-        if not success:
-            print(f"⚠️  Continuing despite failure...")
-
-    # Install post-processing models
-    for model_id in postprocess_models:
-        print(f"\n📦 Installing post-process model: {model_id}")
-        success = await installer.install_postprocess_model(model_id)
-        if not success:
-            print(f"⚠️  Continuing despite failure...")
+    for group_name, model_list, install_func in model_groups:
+        if model_list:
+            print(f"\n📦 Installing {group_name}...")
+            for model_id in model_list:
+                print(f"\n   Installing: {model_id}")
+                success = await install_func(model_id)
+                if not success:
+                    print(f"   ⚠️  Continuing despite failure...")
 
     total_time = time.time() - start_time
 
@@ -760,21 +971,93 @@ Examples:
     print(f"\n⏱️  Total installation time: {total_time/60:.1f} minutes")
 
     # Post-installation setup
+    print_post_installation_guide(installer)
+
+
+def verify_existing_models(installer: ModelInstaller):
+    """Verify all existing models"""
+    print("🔍 VERIFYING EXISTING MODELS")
+    print("=" * 50)
+
+    all_model_types = [
+        ("base", BASE_MODELS),
+        ("controlnet", CONTROLNET_MODELS),
+        ("controlnet_sdxl", SDXL_CONTROLNET_MODELS),
+        ("postprocess", POSTPROCESS_MODELS),
+        ("lora", LORA_MODELS),
+        ("vae", VAE_MODELS),
+    ]
+
+    verified_models = []
+    corrupted_models = []
+    missing_models = []
+
+    for model_type, model_dict in all_model_types:
+        for model_id in model_dict.keys():
+            if installer.check_model_exists(model_id, model_type):
+                # Model exists, verify integrity
+                if model_type == "base":
+                    model_path = installer.base_path / "stable-diffusion" / model_id
+                elif model_type == "controlnet":
+                    model_path = installer.base_path / "controlnet" / "sd" / model_id
+                elif model_type == "controlnet_sdxl":
+                    model_path = installer.base_path / "controlnet" / "sdxl" / model_id
+                elif model_type == "lora":
+                    model_path = installer.base_path / "lora" / model_id
+                elif model_type == "vae":
+                    model_path = installer.base_path / "vae" / model_id
+                elif model_type == "postprocess":
+                    if "esrgan" in model_id:
+                        model_path = installer.base_path / "upscale" / "real-esrgan"
+                    elif "gfpgan" in model_id:
+                        model_path = installer.base_path / "face-restore" / "gfpgan"
+                    elif "codeformer" in model_id:
+                        model_path = installer.base_path / "face-restore" / "codeformer"
+                    else:
+                        model_path = installer.base_path / "postprocess" / model_id
+
+                if installer.verify_model_integrity(model_path, model_type):
+                    verified_models.append(
+                        {"id": model_id, "type": model_type, "path": str(model_path)}
+                    )
+                    print(f"✅ {model_id} ({model_type}) - OK")
+                else:
+                    corrupted_models.append(
+                        {"id": model_id, "type": model_type, "path": str(model_path)}
+                    )
+                    print(f"❌ {model_id} ({model_type}) - CORRUPTED")
+            else:
+                missing_models.append({"id": model_id, "type": model_type})
+                print(f"⭕ {model_id} ({model_type}) - NOT INSTALLED")
+
+    print(f"\n📊 VERIFICATION SUMMARY:")
+    print(f"✅ Verified: {len(verified_models)}")
+    print(f"❌ Corrupted: {len(corrupted_models)}")
+    print(f"⭕ Missing: {len(missing_models)}")
+
+
+def print_post_installation_guide(installer: ModelInstaller):
+    """Print post-installation setup guide"""
     print("\n🔧 POST-INSTALLATION SETUP")
     print("=" * 50)
     print("1. Update your .env file with model paths:")
     print(f"   SD_MODEL_PATH={installer.base_path}/stable-diffusion")
     print(f"   CONTROLNET_PATH={installer.base_path}/controlnet")
+    print(f"   LORA_PATH={installer.base_path}/lora")
+    print(f"   VAE_PATH={installer.base_path}/vae")
     print(f"   UPSCALE_MODEL_PATH={installer.base_path}/upscale")
     print("")
     print("2. Restart the application to load new models")
     print("")
     print("3. Test installation with:")
     print("   python scripts/test_phase4.py")
+    print("")
+    print("4. Verify models anytime with:")
+    print("   python scripts/install_models.py --verify-only")
 
 
 def print_available_models():
-    """Print all available models with details"""
+    """Print all available models with enhanced details"""
     print("📚 AVAILABLE MODELS")
     print("=" * 80)
 
@@ -801,6 +1084,26 @@ def print_available_models():
         print(f"                    Use cases: {', '.join(config['use_cases'])}")
         print()
 
+    print("🎨 LORA MODELS:")
+    for model_id, config in LORA_MODELS.items():
+        print(f"  {model_id:15} - {config['description']}")
+        print(
+            f"                    Size: {config['size_estimate']}, Compatible: {', '.join(config['compatible_with'])}"
+        )
+        print(f"                    Strength: {config['strength_range']}")
+        print()
+
+    print("🖼️  VAE MODELS:")
+    for model_id, config in VAE_MODELS.items():
+        print(f"  {model_id:15} - {config['description']}")
+        print(
+            f"                    Size: {config['size_estimate']}, Compatible: {', '.join(config['compatible_with'])}"
+        )
+        recommended = "⭐ RECOMMENDED" if config.get("recommended", False) else ""
+        if recommended:
+            print(f"                    {recommended}")
+        print()
+
     print("🛠️  POST-PROCESSING MODELS:")
     for model_id, config in POSTPROCESS_MODELS.items():
         print(f"  {model_id:15} - {config['description']}")
@@ -809,9 +1112,14 @@ def print_available_models():
 
 
 def calculate_estimated_space(
-    base_models, controlnet_models, controlnet_sdxl_models, postprocess_models
+    base_models,
+    controlnet_models,
+    controlnet_sdxl_models,
+    postprocess_models,
+    lora_models=None,
+    vae_models=None,
 ):
-    """Calculate estimated download space in GB"""
+    """Calculate estimated download space in GB with all model types"""
     total_gb = 0.0
 
     # Size estimates in GB
@@ -833,18 +1141,33 @@ def calculate_estimated_space(
         "depth-sdxl": 2.5,
         # Post-processing
         "real-esrgan-x4": 0.064,
+        "real-esrgan-x2": 0.064,
         "real-esrgan-anime": 0.018,
         "gfpgan": 0.348,
+        "codeformer": 0.359,
+        # LoRA models
+        "detail-tweaker": 0.144,
+        "film-photography": 0.144,
+        "anime-style-xl": 0.144,
+        "realistic-vision": 0.144,
+        # VAE models
+        "sdxl-vae": 0.335,
+        "vae-ft-mse": 0.335,
+        "anime-vae": 0.335,
     }
 
     all_models = (
         base_models + controlnet_models + controlnet_sdxl_models + postprocess_models
     )
+    if lora_models:
+        all_models += lora_models
+    if vae_models:
+        all_models += vae_models
 
     for model in all_models:
         total_gb += size_map.get(model, 1.0)  # Default 1GB if unknown
 
-    return total_gb
+    return total_gb  #!/usr/bin/env python3
 
 
 def check_disk_space():
