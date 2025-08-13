@@ -1,7 +1,7 @@
 # app/main.py
 """
 astAPI Main Application - Phase 3 Integration
-Updated to include real model management and txt2img generation.
+FastAPI main application with Phase 5 queue and post-processing integration
 """
 import sys
 from pathlib import Path
@@ -28,8 +28,9 @@ import torch
 import platform
 
 from app.config import settings
-from app.api.v1 import txt2img, health, img2img, assets
+from app.api.v1 import txt2img, img2img, health, assets, queue
 from services.models.sd_models import get_model_manager
+from services.queue.task_manager import get_task_manager
 from utils.logging_utils import setup_logging, get_request_logger
 
 
@@ -44,90 +45,110 @@ MINIMAL_MODE = os.getenv("MINIMAL_MODE", "false").lower() == "true"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager for startup and shutdown tasks"""
+    logger = get_request_logger("startup")
+
     # === Initialization on startup ===
     startup_start = time.time()
-    logger.info("🚀 Starting SD Multi-Modal Platform...")
+    logger.info("🚀 Starting SD Multi-Modal Platform - Phase 5")
+    logger.info(f"Environment: {settings.ENVIRONMENT}")
+    logger.info(f"Queue enabled: {settings.ENABLE_QUEUE}")
 
     if MINIMAL_MODE:
         logger.info("🔧 Running in MINIMAL MODE - skipping model initialization")
 
     try:
-        # Validate configuration
-        logger.info("Validating configuration...")
-        settings.ensure_directories()
+        # Initialize task manager and check Redis connection
+        if settings.ENABLE_QUEUE:
+            logger.info("📋 Initializing task queue system...")
+            task_manager = get_task_manager()
 
-        # Initialize model manager only if not in minimal mode
-        model_manager_ready = False
-        if not MINIMAL_MODE:
-            logger.info("Initializing model manager...")
+            # Test Redis connection
+            try:
+                stats = await task_manager.get_queue_stats()
+                if stats.get("redis_connected"):
+                    logger.info("✅ Redis connection successful")
+                else:
+                    logger.warning("⚠️ Redis connection failed - queue disabled")
+            except Exception as e:
+                logger.warning(f"⚠️ Queue system initialization failed: {str(e)}")
+
+        # Initialize model manager (from Phase 4)
+        if not settings.MINIMAL_MODE:
+            logger.info("🤖 Initializing model manager...")
+            from services.models.sd_models import get_model_manager
+
             model_manager = get_model_manager()
 
-            # Try to initialize with primary model
             try:
-                initialization_success = await model_manager.initialize()
-
-                if not initialization_success:
-                    logger.warning("⚠️  Model manager initialization failed")
-                    logger.warning(
-                        "The API will start but txt2img endpoints will be unavailable"
-                    )
-                    logger.warning(
-                        "Run 'python scripts/install_models.py' to download models"
+                success = await model_manager.initialize()
+                if success:
+                    logger.info(
+                        f"✅ Model manager initialized: {model_manager.current_model}"
                     )
                 else:
-                    logger.info(
-                        f"✅ Model manager initialized with: {model_manager.current_model_id}"
+                    logger.warning(
+                        "⚠️ Model initialization failed - running in limited mode"
                     )
-                    model_manager_ready = True
-
             except Exception as e:
-                logger.error(f"Model initialization error: {e}")
-                logger.warning("Continuing startup without model initialization...")
-        else:
-            logger.info("✅ Model initialization skipped (minimal mode)")
+                logger.warning(f"⚠️ Model initialization error: {str(e)}")
 
-        startup_time = time.time() - startup_start
-        mode_info = "MINIMAL MODE" if MINIMAL_MODE else "FULL MODE"
-        logger.info(
-            f"🎉 Application startup completed in {startup_time:.2f}s ({mode_info})"
-        )
+        # Initialize post-processing pipeline
+        if settings.ENABLE_POSTPROCESS:
+            logger.info("🎨 Initializing post-processing pipeline...")
+            try:
+                from services.postprocess.pipeline_manager import get_pipeline_manager
 
-        # Store startup info for health checks
-        app.state.startup_time = startup_time
-        app.state.model_manager_ready = model_manager_ready
-        app.state.minimal_mode = MINIMAL_MODE
+                pipeline_manager = get_pipeline_manager()
+                logger.info("✅ Post-processing pipeline ready")
+            except Exception as e:
+                logger.warning(f"⚠️ Post-processing initialization failed: {str(e)}")
 
-        yield
+        logger.info("✅ Application startup completed")
 
     except Exception as e:
         logger.error(f"❌ Startup failed: {str(e)}")
-        # Continue startup even if model init fails
-        app.state.startup_time = time.time() - startup_start
-        app.state.model_manager_ready = False
-        app.state.minimal_mode = MINIMAL_MODE
-        yield
+        raise
 
-    finally:
-        # Cleanup on shutdown
-        logger.info("🔄 Shutting down application...")
+    yield
 
-        try:
-            if not MINIMAL_MODE:
-                model_manager = get_model_manager()
-                if model_manager.is_initialized:
-                    await model_manager.cleanup()
-                    logger.info("✅ Model manager cleanup completed")
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+    # Shutdown
+    logger.info("🔄 Shutting down application...")
 
-        logger.info("👋 Application shutdown completed")
+    try:
+        # Cleanup model manager
+        if not settings.MINIMAL_MODE:
+            logger.info("🧹 Cleaning up model manager...")
+            from services.models.sd_models import get_model_manager
+
+            model_manager = get_model_manager()
+            await model_manager.cleanup()
+
+        # Cleanup post-processing models
+        if settings.ENABLE_POSTPROCESS:
+            logger.info("🧹 Cleaning up post-processing pipeline...")
+            from services.postprocess.pipeline_manager import get_pipeline_manager
+
+            pipeline_manager = get_pipeline_manager()
+            await pipeline_manager._unload_all_models()
+
+        # Cleanup old tasks if queue enabled
+        if settings.ENABLE_QUEUE:
+            logger.info("🧹 Cleaning up old tasks...")
+            task_manager = get_task_manager()
+            cleaned_count = await task_manager.cleanup_old_tasks()
+            logger.info(f"🗑️ Cleaned up {cleaned_count} old tasks")
+
+        logger.info("✅ Application shutdown completed")
+
+    except Exception as e:
+        logger.error(f"❌ Shutdown error: {str(e)}")
 
 
 # === FastAPI Application Instance ===
 app = FastAPI(
     title="SD Multi-Modal Platform",
-    description="Production-ready multi-model text-to-image platform with intelligent routing",
-    version="1.0.0-phase3",
+    description="Advanced multi-model text-to-image platform with queue system and post-processing",
+    version="1.0.0-phase5",
     docs_url=f"{settings.API_PREFIX}/docs",
     redoc_url=f"{settings.API_PREFIX}/redoc",
     openapi_url=f"{settings.API_PREFIX}/openapi.json",
@@ -318,9 +339,12 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Include API routers
 app.include_router(health.router, prefix=settings.API_PREFIX)
 app.include_router(txt2img.router, prefix=settings.API_PREFIX)
-
 app.include_router(img2img.router, prefix=settings.API_PREFIX)
 app.include_router(assets.router, prefix=settings.API_PREFIX)
+
+# Phase 5: Include queue router
+if settings.ENABLE_QUEUE:
+    app.include_router(queue.router, prefix=settings.API_PREFIX)
 
 
 # === Root and Info Endpoints ===
@@ -330,88 +354,70 @@ async def root():
     """Root endpoint with basic service information."""
     return {
         "service": "SD Multi-Modal Platform",
-        "version": "1.0.0-phase3",
-        "phase": "Phase 3: Model Management & Real Generation",
+        "version": "1.0.0-phase5",
         "mode": "minimal" if MINIMAL_MODE else "full",
         "api_docs": f"{settings.API_PREFIX}/docs",
         "health_check": f"{settings.API_PREFIX}/health",
-        "status": "operational",
-        "features": [
-            (
-                "Real text-to-image generation"
-                if not MINIMAL_MODE
-                else "API structure testing"
-            ),
-            "Multiple model support (SDXL, SD1.5, SD2.1)",
-            (
-                "Model switching and management"
-                if not MINIMAL_MODE
-                else "Model management (disabled)"
-            ),
-            "RTX 5080 optimizations",
-            "Memory management",
-            "Request tracking",
-            "Structured logging",
-        ],
+        "status": "running",
+        "features": {
+            "generation": True,
+            "img2img": True,
+            "controlnet": True,
+            "assets": True,
+            "queue": settings.ENABLE_QUEUE,
+            "postprocess": settings.ENABLE_POSTPROCESS,
+        },
+        "api_docs": "/docs",
+        "health_check": f"{settings.API_PREFIX}/health",
     }
 
 
-# Additional API information endpoint
+# Enhanced info endpoint
 @app.get(f"{settings.API_PREFIX}/info")
-async def api_info():
-    """Get comprehensive API information."""
-    model_manager = get_model_manager()
+async def system_info(request: Request):
+    """Detailed system information"""
+    import torch
+    import platform
 
-    # Basic info that works in minimal mode
     info = {
+        "platform": {
+            "system": platform.system(),
+            "python_version": platform.python_version(),
+            "architecture": platform.architecture()[0],
+        },
+        "hardware": {
+            "device": settings.DEVICE,
+            "cuda_available": torch.cuda.is_available(),
+        },
+        "configuration": {
+            "minimal_mode": settings.MINIMAL_MODE,
+            "primary_model": settings.PRIMARY_MODEL,
+            "max_batch_size": settings.MAX_BATCH_SIZE,
+            "queue_enabled": settings.ENABLE_QUEUE,
+            "postprocess_enabled": settings.ENABLE_POSTPROCESS,
+        },
         "api": {
             "prefix": settings.API_PREFIX,
             "version": "v1",
-            "docs_url": f"{settings.API_PREFIX}/docs",
-        },
-        "endpoints": {
-            "health": f"{settings.API_PREFIX}/health",
-            "txt2img": f"{settings.API_PREFIX}/txt2img",
-            "txt2img_status": f"{settings.API_PREFIX}/txt2img/status",
-            "models": f"{settings.API_PREFIX}/txt2img/models",
-        },
-        "model_manager": {
-            "initialized": model_manager.is_initialized,
-            "current_model": model_manager.current_model_id,
-            "startup_time": model_manager.startup_time,
-        },
-        "configuration": {
-            "device": settings.DEVICE,
-            "primary_model": settings.PRIMARY_MODEL,
-            "max_batch_size": settings.MAX_BATCH_SIZE,
-            "default_width": settings.DEFAULT_WIDTH,
-            "default_height": settings.DEFAULT_HEIGHT,
-        },
-        "optimizations": {
-            "use_sdpa": settings.USE_SDPA,
-            "enable_xformers": settings.ENABLE_XFORMERS,
-            "attention_slicing": settings.USE_ATTENTION_SLICING,
-            "cpu_offload": settings.ENABLE_CPU_OFFLOAD,
-        },
-        "mode": {
-            "minimal_mode": MINIMAL_MODE,
-            "model_manager_ready": getattr(app.state, "model_manager_ready", False),
+            "request_id": getattr(request.state, "request_id", None),
         },
     }
 
-    # Add model manager info if available
-    if not MINIMAL_MODE:
+    # Add GPU information if CUDA available
+    if torch.cuda.is_available():
+        info["hardware"]["gpu_name"] = torch.cuda.get_device_name(0)
+        info["hardware"][
+            "gpu_memory"
+        ] = f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB"
+
+    # Add queue stats if enabled
+    if settings.ENABLE_QUEUE:
         try:
-            model_manager = get_model_manager()
-            info["model_manager"] = {
-                "initialized": model_manager.is_initialized,
-                "current_model": model_manager.current_model_id,
-                "startup_time": model_manager.startup_time,
-            }
-        except Exception as e:
-            info["model_manager"] = {"error": str(e), "initialized": False}
-    else:
-        info["model_manager"] = {"disabled": "Running in minimal mode"}
+            task_manager = get_task_manager()
+            queue_stats = await task_manager.get_queue_stats()
+            info["queue"] = queue_stats
+        except Exception:
+            info["queue"] = {"status": "unavailable"}
 
     return info
 
