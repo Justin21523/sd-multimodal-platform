@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     ENABLE_VIDEO_GENERATION: bool = Field(default=False)
     ENABLE_BATCH_API: bool = Field(default=False)
 
+    # # Phase 4 Specific Settings
+    CONTROLNET_MEMORY_EFFICIENT: bool = Field(default=True)
+    MAX_CONTROLNET_PROCESSORS: int = Field(default=2, ge=1, le=4)
+    ENABLE_PROGRESSIVE_LOADING: bool = Field(default=True)
+    ASSET_CACHE_SIZE_MB: int = Field(default=500, ge=100, le=2000)
+
     @field_validator("DEVICE", mode="before")
     @classmethod
     def validate_device(cls, v):
