@@ -298,7 +298,6 @@ def main():
         print("3. Start the main application with queue support")
     else:
         print("\n❌ Installation failed!")
-        sys.exit(1)
 
 
 if __name__ == "__main__":
