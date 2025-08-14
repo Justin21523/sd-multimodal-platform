@@ -1,56 +1,68 @@
-# ===================================
-# SD Multi-Modal Platform Docker Compose
-# ===================================
-
+# docker-compose.yml - Phase 6 with Queue System
 version: '3.8'
 
 services:
-  # Main FastAPI application
+  # =====================================
+  # Redis Message Broker & Result Backend
+  # =====================================
+  redis:
+    image: redis:7-alpine
+    container_name: sd-platform-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_MAXMEMORY=2gb
+      - REDIS_MAXMEMORY_POLICY=allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sd-platform
+    restart: unless-stopped
+
+  # =====================================
+  # FastAPI Application Server
+  # =====================================
   api:
     build:
       context: .
       dockerfile: Dockerfile
-      target: development
-    container_name: sd-multimodal-api
+      target: api
+    container_name: sd-platform-api
     ports:
       - "8000:8000"
-    environment:
-      # API Configuration
-      - API_PREFIX=/api/v1
-      - HOST=0.0.0.0
-      - PORT=8000
-      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080
-
-      # Hardware Configuration
-      - DEVICE=cuda
-      - TORCH_DTYPE=float16
-      - ENABLE_XFORMERS=true
-      - USE_ATTENTION_SLICING=true
-
-      # Logging
-      - LOG_LEVEL=INFO
-      - ENABLE_REQUEST_LOGGING=true
-
-      # Performance
-      - MAX_WORKERS=1
-      - MAX_BATCH_SIZE=1
-
-      # Development settings
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-
     volumes:
-      # Code for development hot reload
-      - .:/app
-      - ./models:/app/models
+      - ./models:/app/models:ro
       - ./outputs:/app/outputs
-      - ./assets:/app/assets
+      - ./cache:/app/cache
       - ./logs:/app/logs
-
-      # Prevent overwriting node_modules if present
-      - /app/node_modules
-
-    # GPU access for CUDA
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DEVICE=cuda
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENT_TASKS=4
+      - RATE_LIMIT_PER_HOUR=100
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - sd-platform
+    restart: unless-stopped
     deploy:
       resources:
         reservations:
@@ -59,120 +71,276 @@ services:
               count: 1
               capabilities: [gpu]
 
-    # Wait for any dependencies
+  # =====================================
+  # Celery Worker for Generation Tasks
+  # =====================================
+  worker-generation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: sd-platform-worker-generation
+    volumes:
+      - ./models:/app/models:ro
+      - ./outputs:/app/outputs
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DEVICE=cuda
+      - LOG_LEVEL=INFO
+      - CELERY_WORKER_CONCURRENCY=2
+      - CELERY_QUEUE=generation
+      - WORKER_TYPE=generation
     depends_on:
-      - redis
-
-    # Health check
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.workers.celery_worker worker
+      --loglevel=info
+      --concurrency=2
+      --queues=generation
+      --hostname=generation-worker@%%h
+      --max-tasks-per-child=50
+      --max-memory-per-child=8388608
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/simple"]
+      test: ["CMD", "celery", "-A", "app.workers.celery_worker", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    networks:
+      - sd-platform
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # =====================================
+  # Celery Worker for Post-processing Tasks
+  # =====================================
+  worker-postprocess:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: sd-platform-worker-postprocess
+    volumes:
+      - ./models:/app/models:ro
+      - ./outputs:/app/outputs
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DEVICE=cuda
+      - LOG_LEVEL=INFO
+      - CELERY_WORKER_CONCURRENCY=1
+      - CELERY_QUEUE=postprocess
+      - WORKER_TYPE=postprocess
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.workers.celery_worker worker
+      --loglevel=info
+      --concurrency=1
+      --queues=postprocess
+      --hostname=postprocess-worker@%%h
+      --max-tasks-per-child=30
+      --max-memory-per-child=6291456
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.workers.celery_worker", "inspect", "ping"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    networks:
+      - sd-platform
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # =====================================
+  # Celery Beat Scheduler (Optional)
+  # =====================================
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: scheduler
+    container_name: sd-platform-scheduler
+    volumes:
+      - ./logs:/app/logs
+      - celery_beat_data:/app/celerybeat-schedule
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.workers.celery_worker beat
+      --loglevel=info
+      --schedule=/app/celerybeat-schedule/celerybeat-schedule
+      --pidfile=/app/celerybeat-schedule/celerybeat.pid
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/celerybeat-schedule/celerybeat.pid"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - sd-platform
+    restart: unless-stopped
+
+  # =====================================
+  # Flower - Celery Monitoring (Development)
+  # =====================================
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: flower
+    container_name: sd-platform-flower
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FLOWER_PORT=5555
+      - FLOWER_BASIC_AUTH=admin:admin123
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.workers.celery_worker flower
+      --port=5555
+      --basic_auth=admin:admin123
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-
-    # Restart policy
-    restart: unless-stopped
-
-    # Networks
+      start_period: 30s
     networks:
-      - sd-network
-
-  # Redis for future queue management
-  redis:
-    image: redis:7-alpine
-    container_name: sd-multimodal-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      - sd-platform
     restart: unless-stopped
-    networks:
-      - sd-network
-
-  # Nginx reverse proxy for production
-  nginx:
-    image: nginx:alpine
-    container_name: sd-multimodal-nginx
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./outputs:/usr/share/nginx/html/outputs:ro
-      - ./assets:/usr/share/nginx/html/assets:ro
-    depends_on:
-      - api
-    restart: unless-stopped
-    networks:
-      - sd-network
     profiles:
-      - production
+      - development  # Only start in development
 
-  # Prometheus for monitoring (optional)
+  # =====================================
+  # Redis Commander - Redis GUI (Development)
+  # =====================================
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: sd-platform-redis-commander
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+      - HTTP_USER=admin
+      - HTTP_PASSWORD=admin123
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - sd-platform
+    restart: unless-stopped
+    profiles:
+      - development  # Only start in development
+
+  # =====================================
+  # Prometheus Monitoring (Optional)
+  # =====================================
   prometheus:
     image: prom/prometheus:latest
-    container_name: sd-multimodal-prometheus
+    container_name: sd-platform-prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
-    restart: unless-stopped
     networks:
-      - sd-network
+      - sd-platform
+    restart: unless-stopped
     profiles:
       - monitoring
 
-  # Grafana for dashboards (optional)
+  # =====================================
+  # Grafana Dashboard (Optional)
+  # =====================================
   grafana:
     image: grafana/grafana:latest
-    container_name: sd-multimodal-grafana
+    container_name: sd-platform-grafana
     ports:
-      - "3001:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
+      - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
     depends_on:
       - prometheus
-    restart: unless-stopped
     networks:
-      - sd-network
+      - sd-platform
+    restart: unless-stopped
     profiles:
       - monitoring
 
-# Named volumes for persistent data
+# =====================================
+# Volumes
+# =====================================
 volumes:
   redis_data:
+    driver: local
+  celery_beat_data:
     driver: local
   prometheus_data:
     driver: local
   grafana_data:
     driver: local
 
+# =====================================
 # Networks
+# =====================================
 networks:
-  sd-network:
+  sd-platform:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    name: sd-platform-network
 
-# Development override
-# Use: docker-compose -f docker-compose.yml -f docker-compose.override.yml up
+# =====================================
+# Development Override
+# =====================================
+# To use development setup with monitoring:
+# docker-compose --profile development --profile monitoring up
+
+# Production setup (minimal):
+# docker-compose up api worker-generation worker-postprocess redis
+
+# Full development setup:
+# docker-compose --profile development up

@@ -369,7 +369,7 @@ class Txt2ImgService:
             self.total_generation_time += generation_time
 
             # Save metadata
-            file_info = get_image_info(image_path)
+            file_info = get_image_info(image_path)  # type: ignore
 
             logger.info(
                 f"✅ Image generation completed",

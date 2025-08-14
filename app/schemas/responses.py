@@ -1,7 +1,7 @@
 # app/schemas/responses.py
 """
 Response schemas for SD Multi-Modal Platform API endpoints.
-Defines Pydantic models for response validation and documentation.
+Response schemas for SD Multi-Modal Platform APIs
 """
 
 from typing import Optional, List, Dict, Any, Union
@@ -11,29 +11,74 @@ from datetime import datetime
 import time
 
 
-class ImageInfo(BaseModel):
-    """Information about a generated image."""
+class BaseResponse(BaseModel):
+    """Base response model for all API endpoints"""
 
-    index: int = Field(description="Image index in batch")
-    width: int = Field(description="Image width in pixels")
-    height: int = Field(description="Image height in pixels")
-    mode: str = Field(description="Image color mode (e.g., 'RGB')")
-    file_path: Optional[str] = Field(
-        default=None, description="Relative path to saved image file"
+    success: bool = Field(..., description="Operation success status")
+    message: str = Field(..., description="Human-readable message")
+    timestamp: float = Field(default_factory=time.time, description="Unix timestamp")
+
+
+# Error response schema
+class ErrorResponse(BaseResponse):
+    """Standard error response format."""
+
+    success: bool = Field(
+        default=False, description="Whether the request was successful"
     )
-    file_size_bytes: Optional[int] = Field(
-        default=None, description="File size in bytes"
+    error: str = Field(..., description="Error message")
+    error_code: Optional[str] = Field(
+        default=None, description="Error code for programmatic handling"
     )
-    base64: Optional[str] = Field(default=None, description="Base64 encoded image data")
+    status_code: int = Field(description="HTTP status code")
+    message: Optional[str] = Field(
+        default=None, description="Additional message or details about the error"
+    )
+    # Request metadata
+    request_id: Optional[str] = Field(
+        default=None, description="Unique identifier for the request"
+    )
+    timestamp: float = Field(
+        default_factory=time.time, description="Error response timestamp"
+    )
+
+    # Debug information
+    debug_info: Optional[Dict[str, Any]] = Field(
+        default=None, description="Debug information (if applicable)"
+    )
+
+
+class HealthResponse(BaseResponse):
+    """Health check response model"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="Health check data")
+
+    class HealthData(BaseModel):
+        status: str = Field(
+            ..., description="Health status: healthy, degraded, unhealthy"
+        )
+        service: Dict[str, str] = Field(..., description="Service information")
+        system: Dict[str, Any] = Field(..., description="System information")
+        gpu: Optional[Dict[str, str]] = Field(
+            default=None, description="GPU information"
+        )
+        capabilities: Dict[str, bool] = Field(..., description="Available capabilities")
 
 
 class ModelInfo(BaseModel):
-    """Information about a model."""
+    """Model information schema"""
 
     model_id: str = Field(description="Model identifier")
-    model_name: str = Field(description="Human-readable model name")
+    name: str = Field(description="Human-readable model name")
     type: str = Field(
         ..., description="Model type (e.g., 'text-to-image', 'image-to-image')"
+    )
+    capabilities: List[str] = Field(..., description="Supported capabilities")
+    vram_requirement: str = Field(..., description="VRAM requirement")
+    strengths: List[str] = Field(default_factory=list, description="Model strengths")
+    recommended_for: List[str] = Field(
+        default_factory=list, description="Recommended use cases"
     )
     path: str = Field(..., description="Path to the model file or directory")
 
@@ -74,6 +119,251 @@ class ModelInfo(BaseModel):
         default=25, description="Recommended inference steps"
     )
     recommended_cfg: float = Field(default=7.5, description="Recommended CFG")
+
+
+class GenerationMetadata(BaseModel):
+    """Generation metadata schema"""
+
+    task_id: str = Field(..., description="Unique task identifier")
+    prompt: str = Field(..., description="Original prompt")
+    negative_prompt: Optional[str] = Field(default="", description="Negative prompt")
+    model_used: str = Field(..., description="Model used for generation")
+    seed: Optional[int] = Field(default=None, description="Random seed used")
+    generation_params: Dict[str, Any] = Field(..., description="Generation parameters")
+    processing_time: float = Field(..., description="Total processing time in seconds")
+    vram_usage: str = Field(..., description="VRAM usage during generation")
+    image_count: int = Field(..., description="Number of images generated")
+    created_at: float = Field(
+        default_factory=time.time, description="Creation timestamp"
+    )
+
+
+class GenerationResults(BaseModel):
+    """Generation results schema"""
+
+    images: List[str] = Field(..., description="Generated image URLs or paths")
+    metadata: GenerationMetadata = Field(..., description="Generation metadata")
+    processing_time: Dict[str, float] = Field(
+        ..., description="Breakdown of processing times"
+    )
+    num_images: int = Field(description="Number of images generated")
+    generation_time: float = Field(description="Time spent generating images (seconds)")
+    total_time: float = Field(description="Total request processing time (seconds)")
+    vram_used_gb: float = Field(description="VRAM usage in GB")
+
+    class ProcessingTime(BaseModel):
+        total: float = Field(..., description="Total processing time")
+        preprocessing: float = Field(default=0.0, description="Preprocessing time")
+        generation: float = Field(..., description="Generation time")
+        postprocessing: float = Field(default=0.0, description="Postprocessing time")
+
+
+class GenerationResponse(BaseResponse):
+    """Standard generation response"""
+
+    success: bool = Field(default=True)
+    message: str = Field(default="Generation completed successfully")
+    data: Dict[str, Any] = Field(..., description="Generation results and metadata")
+
+
+class Txt2ImgResponse(GenerationResponse):
+    """Text-to-image generation response"""
+
+    task_id: str = Field(..., description="Task identifier")
+    request_id: str = Field(description="Request tracking ID")
+
+    class Txt2ImgData(BaseModel):
+        metadata: GenerationMetadata = Field(..., description="Generation metadata")
+        timestamp: float = Field(description="Response timestamp")
+        model_info: Dict[str, str] = Field(..., description="Model information")
+
+
+class Img2ImgResponse(GenerationResponse):
+    """Image-to-image generation response"""
+
+    class Img2ImgData(BaseModel):
+        task_id: str = Field(..., description="Task identifier")
+        images: List[str] = Field(..., description="Generated image paths")
+        metadata: GenerationMetadata = Field(..., description="Generation metadata")
+        processing_time: Dict[str, float] = Field(
+            ..., description="Processing time breakdown"
+        )
+        controlnet_info: Optional[Dict[str, Any]] = Field(
+            default=None, description="ControlNet information"
+        )
+        model_info: Dict[str, str] = Field(..., description="Model information")
+
+
+class InpaintResponse(GenerationResponse):
+    """Inpainting generation response"""
+
+    class InpaintData(BaseModel):
+        task_id: str = Field(..., description="Task identifier")
+        images: List[str] = Field(..., description="Generated image paths")
+        metadata: GenerationMetadata = Field(..., description="Generation metadata")
+        inpaint_info: Dict[str, Any] = Field(
+            ..., description="Inpainting-specific information"
+        )
+        processing_time: Dict[str, float] = Field(
+            ..., description="Processing time breakdown"
+        )
+
+
+class ModelListResponse(BaseResponse):
+    """Model list response"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="Available models information")
+
+    class ModelListData(BaseModel):
+        available_models: List[ModelInfo] = Field(
+            ..., description="List of available models"
+        )
+        current_model: Optional[str] = Field(
+            default=None, description="Currently loaded model"
+        )
+        total_models: int = Field(..., description="Total number of available models")
+        installed_models: int = Field(description="Number of installed models")
+
+
+class ModelStatusResponse(BaseResponse):
+    """Model status response"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="Model status information")
+    service: str = Field(description="Service name")
+    endpoint: str = Field(description="API endpoint")
+
+    class ModelStatusData(BaseModel):
+        current_model: Optional[str] = Field(
+            default=None, description="Currently loaded model"
+        )
+        is_loaded: bool = Field(..., description="Whether a model is loaded")
+        vram_usage: str = Field(..., description="Current VRAM usage")
+        supported_tasks: List[str] = Field(
+            ..., description="Supported generation tasks"
+        )
+        model_info: Optional[ModelInfo] = Field(
+            default=None, description="Current model details"
+        )
+        model_manager: Dict[str, Any] = Field(description="Model manager status")
+        supported_parameters: Dict[str, str] = Field(description="Supported parameters")
+        available_models: Dict[str, Any] = Field(
+            description="Available models information"
+        )
+
+
+class AssetInfo(BaseModel):
+    """Asset information schema"""
+
+    asset_id: str = Field(..., description="Asset unique identifier")
+    filename: str = Field(..., description="Original filename")
+    file_path: str = Field(..., description="File storage path")
+    thumbnail_path: Optional[str] = Field(default=None, description="Thumbnail path")
+    category: str = Field(..., description="Asset category")
+    tags: List[str] = Field(default_factory=list, description="Asset tags")
+    description: str = Field(default="", description="Asset description")
+    file_size: int = Field(..., description="File size in bytes")
+    mime_type: Optional[str] = Field(default=None, description="MIME type")
+    image_info: Dict[str, Any] = Field(
+        default_factory=dict, description="Image properties"
+    )
+    created_at: float = Field(..., description="Creation timestamp")
+    updated_at: float = Field(..., description="Last update timestamp")
+    usage_count: int = Field(default=0, description="Usage count")
+    last_used: Optional[float] = Field(default=None, description="Last used timestamp")
+
+
+class AssetUploadResponse(BaseResponse):
+    """Asset upload response"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="Upload results")
+
+    class AssetUploadData(BaseModel):
+        uploaded_assets: List[Dict[str, Any]] = Field(
+            ..., description="Successfully uploaded assets"
+        )
+        failed_uploads: List[Dict[str, str]] = Field(
+            ..., description="Failed uploads with errors"
+        )
+        summary: Dict[str, int] = Field(..., description="Upload summary statistics")
+        processing_time: float = Field(..., description="Total processing time")
+
+
+class AssetListResponse(BaseResponse):
+    """Asset list response"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="Asset list data")
+
+    class AssetListData(BaseModel):
+        assets: List[AssetInfo] = Field(..., description="List of assets")
+        pagination: Dict[str, int] = Field(..., description="Pagination information")
+        filters: Dict[str, Any] = Field(..., description="Applied filters")
+        total_count: int = Field(..., description="Total assets matching filters")
+
+
+class AssetResponse(BaseResponse):
+    """Single asset response"""
+
+    success: bool = Field(default=True)
+    data: AssetInfo = Field(..., description="Asset information")
+
+
+class ServiceStatusResponse(BaseResponse):
+    """Service status response"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="Service status data")
+
+    class ServiceStatusData(BaseModel):
+        service_available: bool = Field(..., description="Service availability")
+        current_model: Optional[str] = Field(default=None, description="Current model")
+        supported_models: List[str] = Field(..., description="Supported models")
+        vram_usage: str = Field(..., description="VRAM usage")
+        capabilities: Dict[str, bool] = Field(..., description="Service capabilities")
+        performance_stats: Optional[Dict[str, float]] = Field(
+            default=None, description="Performance statistics"
+        )
+
+
+class ControlNetStatusResponse(BaseResponse):
+    """ControlNet status response"""
+
+    success: bool = Field(default=True)
+    data: Dict[str, Any] = Field(..., description="ControlNet status data")
+
+    class ControlNetStatusData(BaseModel):
+        loaded_processors: List[str] = Field(
+            ..., description="Loaded ControlNet processors"
+        )
+        supported_types: List[str] = Field(
+            ..., description="Supported ControlNet types"
+        )
+        pipeline_loaded: bool = Field(
+            ..., description="Whether ControlNet pipeline is loaded"
+        )
+        total_vram_usage: str = Field(..., description="Total VRAM usage")
+        available_models: Dict[str, str] = Field(
+            ..., description="Available ControlNet models"
+        )
+
+
+class ImageInfo(BaseModel):
+    """Information about a generated image."""
+
+    index: int = Field(description="Image index in batch")
+    width: int = Field(description="Image width in pixels")
+    height: int = Field(description="Image height in pixels")
+    mode: str = Field(description="Image color mode (e.g., 'RGB')")
+    file_path: Optional[str] = Field(
+        default=None, description="Relative path to saved image file"
+    )
+    file_size_bytes: Optional[int] = Field(
+        default=None, description="File size in bytes"
+    )
+    base64: Optional[str] = Field(default=None, description="Base64 encoded image data")
 
 
 class ImageMetadata(BaseModel):
@@ -144,16 +434,6 @@ class GenerationParams(BaseModel):
     seed: int = Field(description="Random seed used")
 
 
-class GenerationResults(BaseModel):
-    """Results of image generation."""
-
-    num_images: int = Field(description="Number of images generated")
-    images: List[ImageInfo] = Field(description="Information about generated images")
-    generation_time: float = Field(description="Time spent generating images (seconds)")
-    total_time: float = Field(description="Total request processing time (seconds)")
-    vram_used_gb: float = Field(description="VRAM usage in GB")
-
-
 class Txt2ImgResponseData(BaseModel):
     """Data payload for txt2img response."""
 
@@ -194,74 +474,6 @@ class GeneratedImage(BaseModel):
         return f"{base_url.rstrip('/')}/{self.url.lstrip('/')}"
 
 
-class Txt2ImgResponse(BaseModel):
-    """Response schema for text-to-image generation."""
-
-    success: bool = Field(description="Whether generation was successful")
-    task_id: str = Field(description="Unique task identifier")
-    message: str = Field(description="Status message")
-    data: Optional[Dict[str, Any]] = Field(
-        description="Generation results and metadata"
-    )
-    request_id: str = Field(description="Request tracking ID")
-    timestamp: float = Field(description="Response timestamp")
-
-
-# Error response schema
-class ErrorResponse(BaseModel):
-    """Standard error response format."""
-
-    success: bool = Field(
-        default=False, description="Whether the request was successful"
-    )
-    error: str = Field(..., description="Error message")
-    status_code: int = Field(description="HTTP status code")
-    message: Optional[str] = Field(
-        default=None, description="Additional message or details about the error"
-    )
-    # Request metadata
-    request_id: Optional[str] = Field(
-        default=None, description="Unique identifier for the request"
-    )
-    timestamp: float = Field(
-        default_factory=time.time, description="Error response timestamp"
-    )
-
-    # Debug information
-    debug_info: Optional[Dict[str, Any]] = Field(
-        default=None, description="Debug information (if applicable)"
-    )
-
-
-class HealthResponse(BaseModel):
-    """Health check response schema."""
-
-    status: str = Field(description="Health status (healthy/degraded/unhealthy)")
-    timestamp: float = Field(description="Check timestamp")
-    service: Dict[str, str] = Field(description="Service information")
-    system: Dict[str, Any] = Field(description="System information")
-    gpu: Optional[Dict[str, Any]] = Field(default=None, description="GPU information")
-
-
-class ModelStatusResponse(BaseModel):
-    """Model status response schema."""
-
-    service: str = Field(description="Service name")
-    endpoint: str = Field(description="API endpoint")
-    model_manager: Dict[str, Any] = Field(description="Model manager status")
-    supported_parameters: Dict[str, str] = Field(description="Supported parameters")
-    available_models: Dict[str, Any] = Field(description="Available models information")
-
-
-class ModelListResponse(BaseModel):
-    """Model list response schema."""
-
-    available_models: Dict[str, Any] = Field(description="Detailed model information")
-    currently_loaded: Optional[str] = Field(description="Currently loaded model ID")
-    total_models: int = Field(description="Total number of models")
-    installed_models: int = Field(description="Number of installed models")
-
-
 class ModelSwitchResponse(BaseModel):
     """Model switch response schema."""
 
@@ -280,3 +492,40 @@ class APIInfoResponse(BaseModel):
     model_manager: Dict[str, Any] = Field(description="Model manager status")
     configuration: Dict[str, Any] = Field(description="System configuration")
     optimizations: Dict[str, Any] = Field(description="Performance optimizations")
+
+
+# Helper function to create standard responses
+def create_success_response(
+    message: str = "Operation completed successfully",
+    data: Any = None,
+    response_class: type = BaseResponse,
+) -> Dict[str, Any]:
+    """Create a standard success response"""
+    response_data = {"success": True, "message": message, "timestamp": time.time()}
+
+    if data is not None:
+        response_data["data"] = data
+
+    return response_data
+
+
+def create_error_response(
+    message: str,
+    error_details: Optional[str] = None,
+    error_code: Optional[str] = None,
+    request_id: Optional[str] = None,
+    status_code: int = 500,
+) -> Dict[str, Any]:  # type: ignore[return]
+    """Create a standard error response"""
+    response_data = {
+        "success": False,
+        "message": message,
+        "error": error_details or message,
+        "timestamp": time.time(),
+    }
+
+    if error_code:
+        response_data["error_code"] = error_code
+
+    if request_id:
+        response_data["request_id"] = request_id

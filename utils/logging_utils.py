@@ -1,20 +1,97 @@
 # utils/logging_utils.py
 """
 Structured logging utilities with JSON formatting for production monitoring.
-Phase 2: Backend Framework & Basic API Services
+Fixed structured logging utilities with proper generation logger
 """
 
 import logging
-import logging.config
 import logging.handlers
+from logging.handlers import RotatingFileHandler
 import json
 import sys
 import time
+from datetime import datetime
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
-from datetime import datetime
+
 
 from app.config import settings
+
+
+class JSONFormatter(logging.Formatter):
+    """JSON 格式的日誌格式化器"""
+
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+        }
+
+        # 添加異常信息
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+
+        # 添加額外字段
+        if hasattr(record, "extra_fields"):
+            log_entry.update(record.extra_fields)  # type: ignore
+
+        return json.dumps(log_entry, ensure_ascii=False)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """獲取日誌記錄器"""
+    return logging.getLogger(name)
+
+
+class StructuredLogger:
+    """結構化日誌記錄器"""
+
+    def __init__(self, name: str):
+        self.logger = logging.getLogger(name)
+
+    def log_with_context(self, level: str, message: str, **context):
+        """帶上下文的日誌記錄"""
+        extra = {"extra_fields": context}
+        getattr(self.logger, level.lower())(message, extra=extra)
+
+    def log_task_start(self, task_id: str, task_type: str, user_id: str = None):  # type: ignore
+        """記錄任務開始"""
+        self.log_with_context(
+            "info",
+            f"Task started: {task_id}",
+            task_id=task_id,
+            task_type=task_type,
+            user_id=user_id,
+            event_type="task_start",
+        )
+
+    def log_task_complete(self, task_id: str, duration: float, success: bool = True):
+        """記錄任務完成"""
+        self.log_with_context(
+            "info" if success else "error",
+            f"Task {'completed' if success else 'failed'}: {task_id}",
+            task_id=task_id,
+            duration=duration,
+            success=success,
+            event_type="task_complete",
+        )
+
+    def log_performance(self, operation: str, duration: float, **metrics):
+        """記錄性能指標"""
+        self.log_with_context(
+            "info",
+            f"Performance: {operation}",
+            operation=operation,
+            duration=duration,
+            event_type="performance",
+            **metrics,
+        )
 
 
 class StructuredFormatter(logging.Formatter):
@@ -82,6 +159,33 @@ class StructuredFormatter(logging.Formatter):
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
 
+        # Add custom fields from extra
+        for key, value in record.__dict__.items():
+            if key not in [
+                "name",
+                "msg",
+                "args",
+                "levelname",
+                "levelno",
+                "pathname",
+                "filename",
+                "module",
+                "lineno",
+                "funcName",
+                "created",
+                "msecs",
+                "relativeCreated",
+                "thread",
+                "threadName",
+                "processName",
+                "process",
+                "getMessage",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+            ]:
+                log_entry[key] = value
+
         return json.dumps(log_entry, ensure_ascii=False)
 
 
@@ -91,6 +195,9 @@ class HumanReadableFormatter(logging.Formatter):
     """
 
     def __init__(self):
+        super().__init__()
+        self.fmt = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+        self.datefmt = "%H:%M:%S"
         # Color codes for different log levels
         self.COLORS = {
             "DEBUG": "\033[36m",  # Cyan
@@ -129,11 +236,50 @@ class HumanReadableFormatter(logging.Formatter):
         if hasattr(record, "process_time"):
             parts.append(f"({record.process_time:.3f}s)")  # type: ignore[attr-defined]
 
-        return " ".join(parts)
+        # Add extra fields to message if present
+        extra_fields = parts.copy()
+        for key, value in record.__dict__.items():
+            if key not in [
+                "name",
+                "msg",
+                "args",
+                "levelname",
+                "levelno",
+                "pathname",
+                "filename",
+                "module",
+                "lineno",
+                "funcName",
+                "created",
+                "msecs",
+                "relativeCreated",
+                "thread",
+                "threadName",
+                "processName",
+                "process",
+                "getMessage",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+                "asctime",
+            ]:
+                if key == "request_id":
+                    extra_fields.append(f"req:{value}")
+                elif key == "task_id":
+                    extra_fields.append(f"task:{value}")
+                elif key == "generation_time":
+                    extra_fields.append(f"gen:{value}s")
+                elif key == "vram_used":
+                    extra_fields.append(f"vram:{value}")
+
+        if extra_fields:
+            record.msg = f"{record.msg} [{' | '.join(extra_fields)}]"
+
+        return super().format(record)
 
 
 def setup_logging(
-    log_level: Optional[str] = None,
+    log_level: Optional[str] = "INFO",
     log_file: Optional[str] = None,
     enable_json: bool = True,
 ) -> None:
@@ -145,16 +291,6 @@ def setup_logging(
         log_file: Optional log file path. If None, uses settings.LOG_FILE
         enable_json: Whether to use JSON formatting for file logs
     """
-
-    # Use settings or defaults
-    if log_level is None:
-        log_level = getattr(settings, "LOG_LEVEL", "INFO")
-
-    if log_file is None:
-        # Create logs directory if it doesn't exist
-        log_dir = Path("logs")
-        log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / "app.log"  # type: ignore[attr-defined]
 
     # Get root logger
     root_logger = logging.getLogger()
@@ -171,20 +307,27 @@ def setup_logging(
     console_handler.setFormatter(HumanReadableFormatter())
     root_logger.addHandler(console_handler)
 
+    # Use settings or defaults
+    if log_level is None:
+        log_level = getattr(settings, "LOG_LEVEL", "INFO")
+
+    if log_file is None:
+        # Create logs directory if it doesn't exist
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / "app.log"  # type: ignore[attr-defined]
+
     # File handler with JSON format
-    if enable_json:
-        # Rotating file handler to prevent huge log files
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file,  # type: ignore[arg-type]
-            maxBytes=10 * 1024 * 1024,  # 10 MB
-            backupCount=5,
-            encoding="utf-8",
-        )
-        file_handler.setLevel(
-            getattr(logging, log_level.upper() if log_level else "INFO")
-        )
+    try:
+        file_handler = RotatingFileHandler(
+            log_dir / "app.log", maxBytes=10 * 1024 * 1024, backupCount=5  # type: ignore[arg-type]
+        )  # 10MB
+        file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(StructuredFormatter())
         root_logger.addHandler(file_handler)
+
+    except Exception as e:
+        root_logger.warning(f"Failed to setup file logging: {e}")
 
     # Set specific logger levels
     # Suppress overly verbose libraries
@@ -201,6 +344,40 @@ def setup_logging(
             "json_enabled": enable_json,
         },
     )
+
+
+class RequestLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter that automatically adds request_id to all log entries"""
+
+    def __init__(self, logger: logging.Logger, request_id: str):
+        super().__init__(logger, {"request_id": request_id})
+
+    def process(self, msg, kwargs):
+        # Ensure request_id is always included
+        if "extra" not in kwargs:
+            kwargs["extra"] = {}
+        kwargs["extra"].update(self.extra)  # type: ignore
+        return msg, kwargs
+
+
+class GenerationLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter for generation tasks with model and task information"""
+
+    def __init__(
+        self, logger: logging.Logger, task_type: str, model_name: str = "unknown"
+    ):
+        extra = {
+            "task_type": task_type,
+            "model_name": model_name,
+            "task_id": str(uuid.uuid4())[:8],
+        }
+        super().__init__(logger, extra)
+
+    def process(self, msg, kwargs):
+        if "extra" not in kwargs:
+            kwargs["extra"] = {}
+        kwargs["extra"].update(self.extra)  # type: ignore
+        return msg, kwargs
 
 
 def get_request_logger(request_id: str) -> logging.LoggerAdapter:
@@ -227,7 +404,7 @@ def get_request_logger(request_id: str) -> logging.LoggerAdapter:
 
 
 def get_generation_logger(
-    request_id: str, model_name: str, task_type: str = "generation"
+    request_id: Optional[str], model_name: str, task_type: str = "generation"
 ) -> logging.LoggerAdapter:
     """
     Get a logger adapter for AI generation tasks with context.
@@ -321,3 +498,7 @@ def log_error_with_context(
         extra.update(context)
 
     logger.error(f"Error occurred: {str(error)}", extra=extra, exc_info=True)
+
+
+# Initialize logging when module is imported
+setup_logging()
