@@ -7,13 +7,100 @@ import logging
 from typing import List, Dict, Any, Tuple, Optional, Union
 import io
 from io import BytesIO
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from pathlib import Path
 import cv2
 import base64
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+# 解決 LANCZOS 屬性問題
+try:
+    LANCZOS_FILTER = Image.Resampling.LANCZOS
+except AttributeError:
+    LANCZOS_FILTER = Image.ANTIALIAS  # type: ignore
+
+
+class ImageProcessor:
+    """圖像處理工具類"""
+
+    def __init__(self):
+        self.supported_formats = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
+
+    def pil_to_numpy(self, image: Image.Image) -> np.ndarray:
+        """PIL Image 轉 numpy array"""
+        return np.array(image)
+
+    def numpy_to_pil(self, array: np.ndarray) -> Image.Image:
+        """numpy array 轉 PIL Image"""
+        if array.dtype != np.uint8:
+            array = (array * 255).astype(np.uint8)
+        return Image.fromarray(array)
+
+    def resize_image(self, image: Image.Image, size: Tuple[int, int]) -> Image.Image:
+        """調整圖像大小"""
+        return image.resize(size, LANCZOS_FILTER)
+
+    def crop_center(self, image: Image.Image, size: Tuple[int, int]) -> Image.Image:
+        """中心裁剪"""
+        width, height = image.size
+        new_width, new_height = size
+
+        left = (width - new_width) // 2
+        top = (height - new_height) // 2
+        right = left + new_width
+        bottom = top + new_height
+
+        return image.crop((left, top, right, bottom))
+
+    def enhance_image(
+        self,
+        image: Image.Image,
+        brightness: float = 1.0,
+        contrast: float = 1.0,
+        saturation: float = 1.0,
+    ) -> Image.Image:
+        """圖像增強"""
+        if brightness != 1.0:
+            enhancer = ImageEnhance.Brightness(image)
+            image = enhancer.enhance(brightness)
+
+        if contrast != 1.0:
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(contrast)
+
+        if saturation != 1.0:
+            enhancer = ImageEnhance.Color(image)
+            image = enhancer.enhance(saturation)
+
+        return image
+
+    def to_base64(self, image: Image.Image, format: str = "PNG") -> str:
+        """圖像轉 base64"""
+        buffer = io.BytesIO()
+        image.save(buffer, format=format)
+        return base64.b64encode(buffer.getvalue()).decode()
+
+    def from_base64(self, base64_str: str) -> Image.Image:
+        """base64 轉圖像"""
+        image_data = base64.b64decode(base64_str)
+        return Image.open(io.BytesIO(image_data))
+
+    def ensure_rgb(self, image: Image.Image) -> Image.Image:
+        """確保圖像為 RGB 格式"""
+        if image.mode != "RGB":
+            return image.convert("RGB")
+        return image
+
+    def normalize_size(
+        self, width: int, height: int, multiple: int = 8
+    ) -> Tuple[int, int]:
+        """標準化尺寸為指定倍數"""
+        width = (width // multiple) * multiple
+        height = (height // multiple) * multiple
+        return width, height
 
 
 def base64_to_pil_image(base64_string: str) -> Image.Image:

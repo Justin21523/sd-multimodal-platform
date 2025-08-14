@@ -19,6 +19,81 @@ from typing import Dict, Any, Optional
 from app.config import settings
 
 
+class JSONFormatter(logging.Formatter):
+    """JSON 格式的日誌格式化器"""
+
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+        }
+
+        # 添加異常信息
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+
+        # 添加額外字段
+        if hasattr(record, "extra_fields"):
+            log_entry.update(record.extra_fields)  # type: ignore
+
+        return json.dumps(log_entry, ensure_ascii=False)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """獲取日誌記錄器"""
+    return logging.getLogger(name)
+
+
+class StructuredLogger:
+    """結構化日誌記錄器"""
+
+    def __init__(self, name: str):
+        self.logger = logging.getLogger(name)
+
+    def log_with_context(self, level: str, message: str, **context):
+        """帶上下文的日誌記錄"""
+        extra = {"extra_fields": context}
+        getattr(self.logger, level.lower())(message, extra=extra)
+
+    def log_task_start(self, task_id: str, task_type: str, user_id: str = None):  # type: ignore
+        """記錄任務開始"""
+        self.log_with_context(
+            "info",
+            f"Task started: {task_id}",
+            task_id=task_id,
+            task_type=task_type,
+            user_id=user_id,
+            event_type="task_start",
+        )
+
+    def log_task_complete(self, task_id: str, duration: float, success: bool = True):
+        """記錄任務完成"""
+        self.log_with_context(
+            "info" if success else "error",
+            f"Task {'completed' if success else 'failed'}: {task_id}",
+            task_id=task_id,
+            duration=duration,
+            success=success,
+            event_type="task_complete",
+        )
+
+    def log_performance(self, operation: str, duration: float, **metrics):
+        """記錄性能指標"""
+        self.log_with_context(
+            "info",
+            f"Performance: {operation}",
+            operation=operation,
+            duration=duration,
+            event_type="performance",
+            **metrics,
+        )
+
+
 class StructuredFormatter(logging.Formatter):
     """
     Custom JSON formatter for structured logging.

@@ -8,6 +8,7 @@ import os
 import re
 import time
 import shutil
+import aiofiles
 import uuid
 import logging
 from pathlib import Path
@@ -19,6 +20,112 @@ from utils.logging_utils import setup_logging, get_request_logger
 
 
 logger = logging.getLogger(__name__)
+
+
+class FileManager:
+    """檔案管理工具類"""
+
+    def __init__(self, base_path: Optional[Path] = None):
+        self.base_path = base_path or Path("./outputs")
+        self.base_path.mkdir(parents=True, exist_ok=True)
+
+    async def save_image(
+        self,
+        image: Image.Image,
+        filename: str,
+        subfolder: str = "",
+        user_id: Optional[str] = None,
+    ) -> Path:
+        """異步保存圖像"""
+        # 構建保存路徑
+        save_dir = self.base_path / subfolder
+        if user_id:
+            save_dir = save_dir / user_id
+
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # 處理檔名衝突
+        save_path = save_dir / filename
+        counter = 1
+        while save_path.exists():
+            name_parts = filename.rsplit(".", 1)
+            if len(name_parts) == 2:
+                new_filename = f"{name_parts[0]}_{counter}.{name_parts[1]}"
+            else:
+                new_filename = f"{filename}_{counter}"
+            save_path = save_dir / new_filename
+            counter += 1
+
+        # 保存圖像
+        image.save(save_path)
+        return save_path
+
+    async def save_text(
+        self,
+        content: str,
+        filename: str,
+        subfolder: str = "",
+        user_id: Optional[str] = None,
+    ) -> Path:
+        """異步保存文字檔案"""
+        save_dir = self.base_path / subfolder
+        if user_id:
+            save_dir = save_dir / user_id
+
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / filename
+
+        async with aiofiles.open(save_path, "w", encoding="utf-8") as f:
+            await f.write(content)
+
+        return save_path
+
+    async def read_text(self, file_path: Path) -> str:
+        """異步讀取文字檔案"""
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            return await f.read()
+
+    async def delete_file(self, file_path: Path) -> bool:
+        """刪除檔案"""
+        try:
+            if file_path.exists():
+                file_path.unlink()
+                return True
+            return False
+        except Exception:
+            return False
+
+    async def cleanup_old_files(self, days: int = 7, subfolder: str = "") -> int:
+        """清理舊檔案"""
+        cleanup_dir = self.base_path / subfolder if subfolder else self.base_path
+        if not cleanup_dir.exists():
+            return 0
+
+        cutoff_date = datetime.now() - timedelta(days=days)
+        deleted_count = 0
+
+        for file_path in cleanup_dir.rglob("*"):
+            if file_path.is_file():
+                file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                if file_mtime < cutoff_date:
+                    try:
+                        file_path.unlink()
+                        deleted_count += 1
+                    except Exception:
+                        pass
+
+        return deleted_count
+
+    def get_file_size(self, file_path: Path) -> int:
+        """獲取檔案大小（位元組）"""
+        return file_path.stat().st_size if file_path.exists() else 0
+
+    def list_files(self, subfolder: str = "", pattern: str = "*") -> List[Path]:
+        """列出檔案"""
+        search_dir = self.base_path / subfolder if subfolder else self.base_path
+        if search_dir.exists():
+            return list(search_dir.glob(pattern))
+        return []
 
 
 def ensure_directory(path: Path) -> Path:

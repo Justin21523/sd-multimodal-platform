@@ -9,11 +9,110 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
-
+from pydantic import BaseModel, Field
 from app.config import settings
 from utils.file_utils import ensure_directory, safe_filename
 
 logger = logging.getLogger(__name__)
+
+
+class ImageMetadata(BaseModel):
+    """圖像元數據模型"""
+
+    filename: str
+    prompt: str
+    negative_prompt: str = ""
+    model: str
+    width: int
+    height: int
+    seed: int = -1
+    steps: int = 20
+    cfg_scale: float = 7.5
+    generation_time: float = 0.0
+    task_id: str
+    task_type: str = "txt2img"
+    user_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    # 可擴展的額外參數
+    additional_params: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        json_encoders = {datetime: lambda v: v.isoformat()}
+
+
+class MetadataManager:
+    """元數據管理器"""
+
+    def __init__(self, base_path: Optional[Path] = None):
+        self.base_path = base_path or Path("./metadata")
+        self.base_path.mkdir(parents=True, exist_ok=True)
+
+    async def save_metadata(self, metadata: ImageMetadata, task_id: str) -> Path:
+        """保存元數據"""
+        metadata_dir = self.base_path / task_id[:2]  # 使用前兩個字符分組
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        metadata_file = metadata_dir / f"{task_id}.json"
+
+        # 序列化元數據
+        metadata_dict = metadata.dict()
+        metadata_dict["created_at"] = metadata.created_at.isoformat()
+
+        with open(metadata_file, "w", encoding="utf-8") as f:
+            json.dump(metadata_dict, f, indent=2, ensure_ascii=False)
+
+        return metadata_file
+
+    async def load_metadata(self, metadata_path: Path) -> Optional[ImageMetadata]:
+        """載入元數據"""
+        try:
+            if not metadata_path.exists():
+                return None
+
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata_dict = json.load(f)
+
+            # 轉換日期字符串
+            if "created_at" in metadata_dict:
+                metadata_dict["created_at"] = datetime.fromisoformat(
+                    metadata_dict["created_at"]
+                )
+
+            return ImageMetadata(**metadata_dict)
+
+        except Exception:
+            return None
+
+    async def search_metadata(
+        self, query: Dict[str, Any], limit: int = 100
+    ) -> List[ImageMetadata]:
+        """搜索元數據"""
+        results = []
+
+        for metadata_file in self.base_path.rglob("*.json"):
+            if len(results) >= limit:
+                break
+
+            metadata = await self.load_metadata(metadata_file)
+            if metadata and self._matches_query(metadata, query):
+                results.append(metadata)
+
+        return results
+
+    def _matches_query(self, metadata: ImageMetadata, query: Dict[str, Any]) -> bool:
+        """檢查元數據是否符合查詢條件"""
+        for key, value in query.items():
+            if hasattr(metadata, key):
+                attr_value = getattr(metadata, key)
+                if isinstance(value, str) and isinstance(attr_value, str):
+                    if value.lower() not in attr_value.lower():
+                        return False
+                elif attr_value != value:
+                    return False
+            else:
+                return False
+        return True
 
 
 async def save_generation_metadata(
