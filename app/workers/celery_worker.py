@@ -10,6 +10,12 @@ import torch
 from celery import Celery, Task
 from celery.signals import worker_init, worker_shutdown, task_prerun, task_postrun
 from PIL import Image
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 from app.config import settings
 from app.core.queue_manager import TaskStatus, TaskInfo, QueueManager, get_queue_manager
@@ -17,8 +23,6 @@ from app.core.queue_manager import TaskStatus, TaskInfo, QueueManager, get_queue
 from app.services.generation.img2img_service import Img2ImgService
 from app.services.postprocess.upscale_service import UpscaleService
 from app.services.postprocess.face_restore_service import FaceRestoreService
-
-
 from app.services.generation.txt2img_service import Txt2ImgService
 
 logger = logging.getLogger(__name__)
