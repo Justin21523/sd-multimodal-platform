@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  # Existing services from Phase 4...
+
+  redis:
+    image: redis:7-alpine
+    container_name: sd-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  celery-worker:
+    build: .
+    container_name: sd-celery-worker
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DEVICE=cuda
+    volumes:
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: celery -A services.queue.tasks worker --loglevel=info --concurrency=1
+
+  celery-beat:
+    build: .
+    container_name: sd-celery-beat
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./models:/app/models
+    command: celery -A services.queue.tasks beat --loglevel=info
+
+  flower:
+    build: .
+    container_name: sd-flower
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    ports:
+      - "5555:5555"
+    command: celery -A services.queue.tasks flower --port=5555
+
+volumes:
+  redis_data:

@@ -1,14 +1,49 @@
 # app/schemas/requests.py
 """
-SD Multi-Modal Platform - API Request Schemas
-This module defines the request schemas for the text-to-image generation API.
+Request schemas for SD Multi-Modal Platform API endpoints.
+Defines Pydantic models for request validation and documentation.
 """
 
-from typing import Optional, List, Literal, Annotated
+from typing import Optional, Dict, Any, List, Literal, Annotated
 from pydantic import BaseModel, field_validator, Field, conlist, Field
 from pydantic_settings import BaseSettings
 import re
 import random
+from io import BytesIO
+import base64
+
+
+# Extend existing Txt2ImgRequest
+class ControlNetConfig(BaseModel):
+    """ControlNet configuration for conditional generation"""
+
+    type: Literal["canny", "depth", "openpose", "scribble", "mlsd", "normal"] = Field(
+        ..., description="ControlNet processor type"
+    )
+    image: str = Field(..., description="Base64 encoded condition image")
+    strength: float = Field(
+        default=1.0, ge=0.0, le=2.0, description="ControlNet influence strength"
+    )
+    guidance_start: float = Field(default=0.0, ge=0.0, le=1.0)
+    guidance_end: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    @field_validator("image")
+    @classmethod
+    def validate_base64_image(cls, v: str) -> str:
+        """Validate base64 image format and size"""
+        try:
+            # Remove data URL prefix if present
+            if v.startswith("data:image"):
+                v = v.split(",", 1)[1]
+
+            # Decode and validate
+            image_data = base64.b64decode(v)
+            if len(image_data) > 10 * 1024 * 1024:  # 10MB limit
+                raise ValueError("Image size exceeds 10MB limit")
+
+            return v
+        except Exception as e:
+            raise ValueError(f"Invalid base64 image: {str(e)}")
 
 
 class GenerationParams(BaseModel):
@@ -23,127 +58,230 @@ class GenerationParams(BaseModel):
     seed: Optional[int] = Field(
         default=None, description="random seed for reproducibility"
     )
-
-    @field_validator("seed", mode="before")
-    @classmethod
-    def validate_seed(cls, v):
-        """Ensure seed is a valid integer or None, default to random if None"""
-        if v is None or v == -1:
-            return random.randint(0, 2**32 - 1)
-        return max(0, min(v, 2**32 - 1))
+    num_images: int = Field(
+        default=1,
+        ge=1,
+        le=4,  # Will be validated against settings.MAX_BATCH_SIZE
+        description="Number of images to generate",
+    )
 
     @field_validator("width", "height", mode="before")
     @classmethod
     def validate_dimensions(cls, v):
-        """Ensure dimensions are multiples of 8 for compatibility (e.g., Stable Diffusion requires this)"""
-        return (v // 8) * 8
+        if v is not None and v % 8 != 0:
+            # Round to nearest multiple of 8
+            v = ((v + 7) // 8) * 8
+        return v
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def handle_negative_seed(cls, v):
+        """Convert -1 to None for random seed."""
+        return None if v == -1 else v
 
 
 class Txt2ImgRequest(BaseModel):
-    """Text-to-Image Generation Request Schema"""
+    """Request schema for text-to-image generation."""
+
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="Text prompt describing the desired image",
+    )
+    negative_prompt: str = Field(
+        default="",
+        max_length=2000,
+        description="Negative prompt to avoid unwanted elements",
+    )
+    # Source image (required)
+    init_image: str = Field(..., description="Base64 encoded source image")
 
     # Core parameters
-    prompt: str = Field(
-        ..., min_length=1, max_length=1000, description="Prompt for image generation"
+    strength: float = Field(
+        default=0.75, ge=0.0, le=1.0, description="Noise injection strength"
     )
-    negative_prompt: Optional[str] = Field(
-        default=None,
-        max_length=1000,
-        description="Negative prompt to exclude from generation",
-    )
-
-    # Generation parameters
-    generation_params: Optional[GenerationParams] = Field(
-        default_factory=GenerationParams
-    )
-
-    # Phase 1: Model selection
     model_id: Optional[str] = Field(
-        default=None, description="Assigned model ID for this request"
+        default=None, description="Specific model to use (auto-select if None)"
     )
+    width: int = Field(
+        default=0, ge=256, le=2048, description="Image width (model default if None)"
+    )  # typoe: ignore
 
-    # Phase 1: Image generation control
-    batch_size: int = Field(
+    height: int = Field(
+        default=0,
+        ge=256,
+        le=2048,
+        description="Image height (model default if None)",
+    )
+    num_inference_steps: int = Field(
+        default=25, ge=10, le=100, description="Number of denoising steps"
+    )
+    guidance_scale: float = Field(
+        default=7.5, ge=1.0, le=20.0, description="CFG scale for prompt adherence"
+    )
+    seed: Optional[int] = Field(
+        default=None, ge=-1, le=2**32 - 1, description="Random seed (-1 for random)"
+    )
+    # Optional ControlNet
+    controlnet: Optional[ControlNetConfig] = Field(default=None)
+
+    num_images: int = Field(
         default=1,
         ge=1,
-        le=1,
-        description="Batch size for generation (Phase 1: single image only)",
+        le=4,  # Will be validated against settings.MAX_BATCH_SIZE
+        description="Number of images to generate",
     )
-
-    # Phase 1: Additional options
-    save_metadata: bool = Field(
-        default=True, description="Whether to save generation metadata"
+    save_images: bool = Field(
+        default=True, description="Whether to save images to disk"
     )
     return_base64: bool = Field(
-        default=False, description="Return images as base64 strings instead of URLs"
+        default=False, description="Include base64 encoded images in response"
     )
 
-    @field_validator("prompt", mode="before")
-    @classmethod
-    def validate_prompt(cls, v):
-        """Prompt validation and basic filtering"""
-        # Basic whitespace normalization
-        v = re.sub(r"\s+", " ", v.strip())
-
-        # Basic content filtering (e.g., no NSFW content)
-        forbidden_patterns = [
-            r"\b(nsfw|nude|sex)\b",  # Basic NSFW filter
-        ]
-
-        for pattern in forbidden_patterns:
-            if re.search(pattern, v, re.IGNORECASE):
-                raise ValueError(f"Prompt contains forbidden content")
-
+    @field_validator("width", "height", mode="before")
+    def validate_dimensions(cls, v):
+        """Ensure dimensions are multiples of 8 for SD compatibility."""
+        if v is not None and v % 8 != 0:
+            # Round to nearest multiple of 8
+            v = ((v + 7) // 8) * 8
         return v
 
-    @field_validator("negative_prompt", mode="before")
-    @classmethod
-    def validate_negative_prompt(cls, v):
-        """Negative prompt validation and basic filtering"""
+    @field_validator("seed", mode="before")
+    def handle_negative_seed(cls, v):
+        """Convert -1 to None for random seed."""
         if v is None:
-            return ""
-        return re.sub(r"\s+", " ", v.strip())
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        if str(v) == "-1":
+            return None
+        return v
 
-    def get_effective_params(self) -> dict:
-        """Get effective parameters for the request, excluding None values"""
-        if self.generation_params is not None:
-            params = self.generation_params.model_dump()
-        else:
-            params = {}
+    @field_validator("init_image")
+    @classmethod
+    def validate_init_image(cls, v: str) -> str:
+        """Validate source image"""
+        return ControlNetConfig.validate_base64_image(v)
 
-        # Include model_id if specified
-        return {k: v for k, v in params.items() if v is not None}
 
-    def get_prompt_hash(self) -> str:
-        """Generate a unique hash for the prompt and parameters for caching purposes"""
-        import hashlib
+class Img2ImgRequest(BaseModel):
+    """Image-to-image generation request"""
 
-        content = f"{self.prompt}|{self.negative_prompt}|{self.generation_params.model_dump() if self.generation_params else ''}"
-        return hashlib.md5(content.encode()).hexdigest()[:16]
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    negative_prompt: str = Field(default="", max_length=2000)
+
+    # Source image (required)
+    init_image: str = Field(..., description="Base64 encoded source image")
+
+    # Core parameters
+    strength: float = Field(
+        default=0.75, ge=0.0, le=1.0, description="Noise injection strength"
+    )
+    model_id: Optional[str] = Field(default=None)
+
+    # Generation parameters (inherit defaults from config)
+    width: Optional[int] = Field(default=None, ge=256, le=2048)
+    height: Optional[int] = Field(default=None, ge=256, le=2048)
+    num_inference_steps: int = Field(default=25, ge=10, le=100)
+    guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
+    seed: Optional[int] = Field(default=None)
+
+    # Optional ControlNet
+    controlnet: Optional[ControlNetConfig] = Field(default=None)
+
+    @field_validator("init_image")
+    @classmethod
+    def validate_init_image(cls, v: str) -> str:
+        """Validate source image"""
+        return ControlNetConfig.validate_base64_image(v)
+
+
+class InpaintRequest(BaseModel):
+    """Inpainting generation request"""
+
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    negative_prompt: str = Field(default="", max_length=2000)
+
+    # Required images
+    init_image: str = Field(..., description="Base64 encoded source image")
+    mask_image: str = Field(
+        ..., description="Base64 encoded mask (white=inpaint, black=keep)"
+    )
+
+    # Inpainting specific
+    strength: float = Field(default=0.75, ge=0.0, le=1.0)
+    mask_blur: int = Field(default=4, ge=0, le=20, description="Mask edge blur radius")
+    inpainting_fill: Literal["original", "latent_noise", "latent_nothing", "white"] = (
+        Field(default="original", description="Masked area fill method")
+    )
+
+    # Standard parameters
+    model_id: Optional[str] = Field(default=None)
+    width: Optional[int] = Field(default=None, ge=256, le=2048)
+    height: Optional[int] = Field(default=None, ge=256, le=2048)
+    num_inference_steps: int = Field(default=25, ge=10, le=100)
+    guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
+    seed: Optional[int] = Field(default=None)
+
+
+class AssetUploadRequest(BaseModel):
+    """Asset upload and management request"""
+
+    assets: List[Dict[str, Any]] = Field(..., description="List of asset uploads")
+    category: Literal["reference", "mask", "pose", "depth", "custom"] = Field(
+        default="reference", description="Asset category"
+    )
+    tags: List[str] = Field(
+        default_factory=list, description="Asset tags for organization"
+    )
+
+    class AssetItem(BaseModel):
+        name: str = Field(..., max_length=255)
+        data: str = Field(..., description="Base64 encoded asset data")
+        description: Optional[str] = Field(default="", max_length=500)
+
+        @field_validator("data")
+        @classmethod
+        def validate_asset_data(cls, v: str) -> str:
+            return ControlNetConfig.validate_base64_image(v)
+
+
+# Response schemas remain similar but with additional metadata fields
+class GenerationResponse(BaseModel):
+    """Enhanced generation response with asset tracking"""
+
+    success: bool = True
+    message: str = "Generation completed successfully"
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+    class GenerationData(BaseModel):
+        task_id: str
+        images: List[str] = Field(description="Generated image URLs/paths")
+        metadata: Dict[str, Any] = Field(default_factory=dict)
+
+        # Phase 4 additions
+        controlnet_info: Optional[Dict[str, Any]] = Field(default=None)
+        processing_time: Dict[str, float] = Field(
+            default_factory=dict
+        )  # preprocessing, generation, postprocessing
+        assets_used: List[str] = Field(default_factory=list)
 
 
 class BatchTxt2ImgRequest(BaseModel):
-    """Bathch Text-to-Image Generation Request Schema (Phase 1)"""
+    """Request schema for batch text-to-image generation (future Phase 8)."""
 
     requests: List[Txt2ImgRequest] = Field(
-        ..., description="List of text-to-image generation requests"
-    )  # Phase 1 limits to 1 request
+        ..., min_length=1, max_length=10, description="List of generation requests"
+    )
 
     # Batch control parameters
-    parallel_execution: bool = Field(
-        default=False, description="Whether to run requests in parallel"
+    parallel: bool = Field(
+        default=False, description="Whether to process requests in parallel"
     )
     stop_on_error: bool = Field(
         default=True, description="Whether to stop on the first error"
     )
-
-    @field_validator("requests", mode="before")
-    @classmethod
-    def validate_batch_size(cls, v):
-        """Phase 1 limits batch size to 1 request only"""
-        if len(v) > 1:
-            raise ValueError("Phase 1 only supports single request batches")
-        return v
 
 
 class HealthCheckRequest(BaseModel):
@@ -160,30 +298,13 @@ class HealthCheckRequest(BaseModel):
     )
 
 
-# Phase 1 Supported Models
-PHASE1_SUPPORTED_MODELS = [
-    "sdxl-base",
-    "sd-1.5",  # Optional: can be added later
-]
-
-
 class ModelSwitchRequest(BaseModel):
-    """Model Switch Request Schema (Phase 1)"""
+    """Request schema for model switching."""
 
-    model_id: str = Field(..., description="Model ID to switch to")
+    model_id: str = Field(..., description="Target model ID to switch to")
     force_reload: bool = Field(
         default=False, description="Force reload the model even if already loaded"
     )
-
-    @field_validator("model_id", mode="before")
-    @classmethod
-    def validate_model_id(cls, v):
-        """Validate the model ID against supported models"""
-        if v not in PHASE1_SUPPORTED_MODELS:
-            raise ValueError(
-                f"Unsupported model: {v}. Supported: {PHASE1_SUPPORTED_MODELS}"
-            )
-        return v
 
 
 # Default negative prompts for common issues
