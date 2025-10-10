@@ -19,7 +19,7 @@ from typing import Dict, Any
 import os
 
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -32,22 +32,34 @@ import platform
 
 from app.config import settings
 from app.core.queue_manager import get_queue_manager, shutdown_queue_manager
+
 from utils.logging_utils import setup_logging
-from utils.middleware import RequestLoggingMiddleware, RateLimitMiddleware
-from app.api.v1 import (
+
+# Import middleware
+from .api.middleware.rate_limit import RateLimitMiddleware
+from .api.middleware.logging import LoggingMiddleware
+from .api.middleware.auth import AuthMiddleware
+
+# Import routers
+from .api.v1 import (
+    health,
     txt2img,
     img2img,
-    health,
-    assets,
-    queue,
     inpaint,
     upscale,
     face_restore,
+    video,
+    models,
+    queue,
+    caption,
+    vqa,
+    assets,
 )
 from services.models.sd_models import get_model_manager
 from services.queue.task_manager import get_task_manager
 from utils.logging_utils import setup_logging, get_request_logger
-
+from .config import settings
+from .shared_cache import shared_cache
 
 # Set up logging
 setup_logging()
@@ -162,7 +174,7 @@ async def lifespan(app: FastAPI):
 # === FastAPI Application Instance ===
 app = FastAPI(
     title=settings.APP_NAME,
-    version=settings.VERSION,
+    version=settings.APP_VERSION,
     description="""
     **SD Multi-Modal Platform - Phase 6: Queue System & Rate Limiting**
 
@@ -218,12 +230,33 @@ app.add_middleware(
 
 # Compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(LoggingMiddleware)
 
-# Custom middleware
-app.add_middleware(RequestLoggingMiddleware)
-app.add_middleware(
-    RateLimitMiddleware, requests_per_minute=settings.GLOBAL_RATE_LIMIT_PER_MINUTE
-)
+# Include all routers
+routers = [
+    health.router,
+    txt2img.router,
+    img2img.router,
+    inpaint.router,
+    upscale.router,
+    face_restore.router,
+    video.router,
+    models.router,
+    queue.router,
+    caption.router,
+    vqa.router,
+    assets.router,
+]
+
+for router in routers:
+    app.include_router(router, prefix=settings.API_PREFIX)
+
+# Add Prometheus metrics if enabled
+if getattr(settings, "ENABLE_PROMETHEUS", False):
+    from prometheus_fastapi_instrumentator import Instrumentator
+
+    Instrumentator().instrument(app).expose(app)
 
 
 # Request Logging Middleware
@@ -316,25 +349,6 @@ async def request_logging_middleware(request: Request, call_next):
             },
         )
 
-
-# Include API routers
-app.include_router(txt2img.router, prefix=settings.API_PREFIX)
-app.include_router(img2img.router, prefix=settings.API_PREFIX)
-app.include_router(inpaint.router, prefix=settings.API_PREFIX)
-
-# Post-processing endpoints
-app.include_router(upscale.router, prefix=settings.API_PREFIX)
-app.include_router(face_restore.router, prefix=settings.API_PREFIX)
-
-# Queue management endpoints
-app.include_router(queue.router, prefix=settings.API_PREFIX)
-
-# System endpoints
-app.include_router(health.router, prefix="")  # No prefix for health
-
-# Phase 5: Include queue router
-if settings.ENABLE_QUEUE:
-    app.include_router(queue.router, prefix=settings.API_PREFIX)
 
 # =====================================
 # Custom Documentation
@@ -502,8 +516,9 @@ async def root():
     """Root endpoint with platform information"""
     return {
         "name": settings.APP_NAME,
-        "version": settings.VERSION,
-        "phase": settings.PHASE,
+        "version": settings.APP_VERSION,
+        "docs": "/docs",
+        "cache_root": shared_cache.cache_root,
         "status": "operational",
         "api_docs": f"{settings.API_PREFIX}/docs",
         "api_prefix": settings.API_PREFIX,
@@ -540,7 +555,7 @@ async def api_info():
     queue_stats = await queue_manager.get_queue_status()
 
     return {
-        "api_version": settings.VERSION,
+        "api_version": settings.APP_VERSION,
         "api_prefix": settings.API_PREFIX,
         "environment": "development" if settings.DEBUG else "production",
         "device": settings.DEVICE,
@@ -594,6 +609,12 @@ async def server_info():
         )
 
     return info
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi():
+    """Custom OpenAPI endpoint"""
+    return app.openapi()
 
 
 # =====================================
@@ -685,9 +706,6 @@ sd_platform_average_processing_time {stats.average_processing_time}
         return Response(content=metrics_data, media_type="text/plain")
 
 
-# Import Response for metrics endpoint
-from fastapi import Response
-
 # =====================================
 # Startup Banner
 # =====================================
@@ -700,7 +718,7 @@ def print_startup_banner():
 ║                    🎨 SD Multi-Modal Platform - Phase 6                     ║
 ║                        Queue System & Rate Limiting                         ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Version: {settings.VERSION:<20} Device: {settings.DEVICE:<20}          ║
+║  Version: {settings.APP_VERSION:<20} Device: {settings.DEVICE:<20}          ║
 ║  API Prefix: {settings.API_PREFIX:<16} Redis: {'✅ Connected' if True else '❌ Disconnected':<20}      ║
 ║  Max Concurrent: {settings.MAX_CONCURRENT_TASKS:<12} Rate Limit: {settings.RATE_LIMIT_PER_HOUR}/hour          ║
 ╠══════════════════════════════════════════════════════════════════════════════╣

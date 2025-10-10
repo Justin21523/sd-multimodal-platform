@@ -21,12 +21,23 @@ class Settings(BaseSettings):
     """
 
     APP_NAME: str = "SD Multi-Modal Platform"
-    VERSION: str = "1.0.0-phase6"
+    APP_VERSION: str = "0.1.0"
     PHASE: str = "Phase 6: Queue System & Rate Limiting"
-
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=True, extra="allow"
     )
+    DEBUG: bool = False
+
+    # Shared Cache Settings
+    AI_CACHE_ROOT: str = "/mnt/c/web-projects/AI_LLM_projects/ai_warehouse"
+
+    # Model Settings
+    SD_MODEL: str = "runwayml/stable-diffusion-v1-5"
+    CONTROLNET_MODEL: str = "lllyasviel/sd-controlnet-canny"
+    CAPTION_MODEL: str = "Salesforce/blip2-opt-2.7b"
+    VQA_MODEL: str = "llava-hf/llava-1.5-7b-hf"
+    CHAT_MODEL: str = "Qwen/Qwen2-7B-Instruct"
+    EMBEDDING_MODEL: str = "BAAI/bge-m3"
 
     # API Configuration
     API_PREFIX: str = Field(default="/api/v1", description="API route prefix")
@@ -37,6 +48,19 @@ class Settings(BaseSettings):
         description="CORS allowed origins (comma-separated)",
     )
 
+    # Device and Precision
+    DEVICE: str = "auto"  # auto, cuda, cpu
+    PRECISION: str = "float16"  # float32, float16, bfloat16
+    ENABLE_4BIT: bool = False
+    ENABLE_8BIT: bool = False
+
+    # CORS
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
     # === Environment and Mode Settings ===
     ENVIRONMENT: Literal["development", "staging", "production"] = Field(
         default="development", description="Environment mode"
@@ -48,6 +72,12 @@ class Settings(BaseSettings):
     RELOAD: bool = True
     TESTING: bool = False
     MOCK_GENERATION: bool = False  # Use mock responses for testing
+
+    # Database
+    DATABASE_URL: str = "sqlite:///./data/app.db"
+
+    # Offline Mode
+    OFFLINE_MODE: bool = False
 
     # Hardware Configuration - RTX 5080 (sm_120) Optimized
     DEVICE: str = Field(default="cuda", description="PyTorch device (cuda/cpu)")
@@ -106,7 +136,7 @@ class Settings(BaseSettings):
     DEEPFLOYD_MODEL_PATH: Optional[str] = None
     STABLE_CASCADE_MODEL_PATH: Optional[str] = None
 
-    # === Phase 5: Post-processing Paths ===
+    # === Post-processing Paths ===
     UPSCALE_MODELS_PATH: str = Field(
         default="./models/upscale", description="Upscale models directory"
     )
@@ -116,6 +146,7 @@ class Settings(BaseSettings):
 
     # Generation Defaults
     DEFAULT_WIDTH: int = Field(default=1024, description="Default image width")
+    DEFAULT_CFG_SCALE: float = 7.0
     DEFAULT_HEIGHT: int = Field(default=1024, description="Default image height")
     DEFAULT_STEPS: int = Field(default=25, description="Default inference steps")
     DEFAULT_CFG: float = Field(default=7.5, description="Default CFG scale")
@@ -131,7 +162,7 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE: int = 100 * 1024 * 1024  # 100MB
     MAX_REQUEST_SIZE: int = 100 * 1024 * 1024  # 100MB
 
-    # === Phase 5: Queue Configuration ===
+    # === Queue Configuration ===
     ENABLE_QUEUE: bool = Field(default=True, description="Enable task queue system")
     REDIS_HOST: str = Field(default="localhost", description="Redis host")
     REDIS_PORT: int = Field(default=6379, description="Redis port")
@@ -148,6 +179,15 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_HOUR: int = 100  # Max requests per user per hour
     RATE_LIMIT_BURST: int = 10  # Burst allowance
     GLOBAL_RATE_LIMIT_PER_MINUTE: int = 1000  # Global rate limit
+    RATE_LIMIT_REQUESTS: int = 100
+    RATE_LIMIT_MINUTES: int = 1
+    MAX_CONCURRENT_TASKS: int = 4
+
+    # Security Limits
+    MAX_STEPS: int = 100
+    MAX_RESOLUTION: int = 1024 * 1024  # 1MP
+    MAX_IMAGE_SIZE: int = 10 * 1024 * 1024  # 10MB
+    MAX_VIDEO_DURATION: int = 300  # 5 minutes
 
     # === Celery Configuration ===
     CELERY_BROKER_URL: str = Field(
@@ -182,7 +222,7 @@ class Settings(BaseSettings):
         default=72, description="Task retention period in hours"
     )
 
-    # === Phase 5: Post-processing Settings ===
+    # === Post-processing Settings ===
     ENABLE_POSTPROCESS: bool = Field(
         default=True, description="Enable post-processing features"
     )
@@ -207,6 +247,7 @@ class Settings(BaseSettings):
     ENABLE_CPU_OFFLOAD: bool = True
     ENABLE_XFORMERS: bool = True
     ENABLE_TORCH_COMPILE: bool = False  # Experimental
+    ENABLE_VAE_SLICING: bool = True
 
     # GPU memory settings
     GPU_MEMORY_FRACTION: float = 0.9  # Use 90% of GPU memory
@@ -245,10 +286,13 @@ class Settings(BaseSettings):
     SECRET_KEY: str = Field(
         default="your-super-secret-key-change-this", description="JWT secret key"
     )
+    ALLOWED_IMAGE_TYPES: List[str] = ["image/jpeg", "image/png", "image/webp"]
     JWT_EXPIRE_HOURS: int = Field(default=24, description="JWT token expiration hours")
     JWT_SECRET_KEY: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 30
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     ENABLE_NSFW_FILTER: bool = Field(
         default=True, description="Enable NSFW content filtering"
@@ -256,6 +300,10 @@ class Settings(BaseSettings):
     ENABLE_RATE_LIMITING: bool = Field(
         default=True, description="Enable API rate limiting"
     )
+    # Observability
+    ENABLE_PROMETHEUS = False
+    ENABLE_REQUEST_ID = True
+    LOG_BODY_LIMIT_BYTES = 4096
 
     # === Logging and Monitoring ===
     LOG_LEVEL: str = Field(default="INFO", description="Logging level")
