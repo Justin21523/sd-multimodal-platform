@@ -11,6 +11,7 @@ import re
 import random
 from io import BytesIO
 import base64
+from app.config import settings
 
 
 # Extend existing Txt2ImgRequest
@@ -94,8 +95,11 @@ class Txt2ImgRequest(BaseModel):
         max_length=2000,
         description="Negative prompt to avoid unwanted elements",
     )
+    steps: int = Field(default=20, ge=1, le=settings.MAX_STEPS)
+    cfg_scale: float = Field(default=7.0, ge=1.0, le=settings.MAX_CFG)
+
     # Source image (required)
-    init_image: str = Field(..., description="Base64 encoded source image")
+    image: str = Field(..., description="Base64 encoded source image")
 
     # Core parameters
     strength: float = Field(
@@ -114,6 +118,8 @@ class Txt2ImgRequest(BaseModel):
         le=2048,
         description="Image height (model default if None)",
     )
+    sampler: str = Field(default="DPM++ 2M Karras")
+    batch_size: int = Field(default=1, ge=1, le=4)
     num_inference_steps: int = Field(
         default=25, ge=10, le=100, description="Number of denoising steps"
     )
@@ -172,7 +178,8 @@ class Img2ImgRequest(BaseModel):
     negative_prompt: str = Field(default="", max_length=2000)
 
     # Source image (required)
-    init_image: str = Field(..., description="Base64 encoded source image")
+    image: str = Field(..., description="Base64 encoded source image")
+    strength: float = Field(default=0.75, ge=0.0, le=1.0)
 
     # Core parameters
     strength: float = Field(
@@ -190,11 +197,49 @@ class Img2ImgRequest(BaseModel):
     # Optional ControlNet
     controlnet: Optional[ControlNetConfig] = Field(default=None)
 
-    @field_validator("init_image")
-    @classmethod
-    def validate_init_image(cls, v: str) -> str:
-        """Validate source image"""
-        return ControlNetConfig.validate_base64_image(v)
+    @field_validator("image")
+    def validate_image_size(cls, v):
+        # Basic base64 size check (rough estimate)
+        if len(v) > settings.MAX_UPLOAD_MB * 1024 * 1024 * 1.33:  # base64 overhead
+            raise ValueError(f"Image size exceeds {settings.MAX_UPLOAD_MB}MB limit")
+        return v
+
+
+class CaptionRequest(BaseModel):
+    """Image captioning request"""
+
+    image: Optional[str] = None  # base64 encoded image
+    image_url: Optional[str] = None
+    max_length: int = Field(default=50, ge=10, le=200)
+
+    @field_validator("image", "image_url")
+    def validate_image_source(cls, v, values, **kwargs):
+        if not values.get("image") and not values.get("image_url"):
+            raise ValueError("Either image or image_url must be provided")
+        return v
+
+
+class VQARequest(BaseModel):
+    """Visual question answering request"""
+
+    image: Optional[str] = None  # base64 encoded image
+    image_url: Optional[str] = None
+    question: str = Field(..., min_length=1, max_length=1000)
+    max_length: int = Field(default=100, ge=10, le=500)
+
+    @field_validator("image", "image_url")
+    def validate_image_source(cls, v, values, **kwargs):
+        if not values.get("image") and not values.get("image_url"):
+            raise ValueError("Either image or image_url must be provided")
+        return v
+
+
+class QueueSubmitRequest(BaseModel):
+    """Queue task submission request"""
+
+    task_type: str
+    parameters: Dict[str, Any]
+    priority: int = Field(default=0, ge=0, le=10)
 
 
 class InpaintRequest(BaseModel):

@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator, Field, conlist, Field
 from pydantic_settings import BaseSettings
 from datetime import datetime
 import time
+from .common import BaseResponse  # type: ignore
 
 
 class BaseResponse(BaseModel):
@@ -17,6 +18,9 @@ class BaseResponse(BaseModel):
     success: bool = Field(..., description="Operation success status")
     message: str = Field(..., description="Human-readable message")
     timestamp: float = Field(default_factory=time.time, description="Unix timestamp")
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 # Error response schema
@@ -30,6 +34,7 @@ class ErrorResponse(BaseResponse):
     error_code: Optional[str] = Field(
         default=None, description="Error code for programmatic handling"
     )
+    details: Optional[Any] = None
     status_code: int = Field(description="HTTP status code")
     message: Optional[str] = Field(
         default=None, description="Additional message or details about the error"
@@ -48,11 +53,33 @@ class ErrorResponse(BaseResponse):
     )
 
 
+class LivenessResponse(BaseModel):
+    """Liveness probe response"""
+
+    ok: bool
+    timestamp: datetime
+    message: str
+
+
+class ReadinessResponse(BaseModel):
+    """Readiness probe response"""
+
+    ok: bool
+    timestamp: datetime
+    message: str
+    warehouse_accessible: bool
+    system_healthy: bool
+    device_available: bool
+    details: Optional[Dict[str, Any]] = None
+
+
 class HealthResponse(BaseResponse):
     """Health check response model"""
 
-    success: bool = Field(default=True)
-    data: Dict[str, Any] = Field(..., description="Health check data")
+    """Health check response"""
+    status: str = "healthy"
+    version: str = ""
+    cache_initialized: bool = False
 
     class HealthData(BaseModel):
         status: str = Field(
@@ -169,7 +196,9 @@ class GenerationResponse(BaseResponse):
 class Txt2ImgResponse(GenerationResponse):
     """Text-to-image generation response"""
 
-    task_id: str = Field(..., description="Task identifier")
+    image_url: Optional[str] = None
+    task_id: Optional[str] = Field(..., description="Task identifier")
+    metadata: Optional[Dict[str, Any]] = None
     request_id: str = Field(description="Request tracking ID")
 
     class Txt2ImgData(BaseModel):
@@ -181,8 +210,12 @@ class Txt2ImgResponse(GenerationResponse):
 class Img2ImgResponse(GenerationResponse):
     """Image-to-image generation response"""
 
+    """Image to image generation response"""
+    image_url: Optional[str] = None
+    task_id: Optional[str] = Field(..., description="Task identifier")
+    metadata: Optional[Dict[str, Any]] = None
+
     class Img2ImgData(BaseModel):
-        task_id: str = Field(..., description="Task identifier")
         images: List[str] = Field(..., description="Generated image paths")
         metadata: GenerationMetadata = Field(..., description="Generation metadata")
         processing_time: Dict[str, float] = Field(
@@ -192,6 +225,38 @@ class Img2ImgResponse(GenerationResponse):
             default=None, description="ControlNet information"
         )
         model_info: Dict[str, str] = Field(..., description="Model information")
+
+
+class CaptionResponse(BaseResponse):
+    """Image captioning response"""
+
+    caption: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class VQAResponse(BaseResponse):
+    """Visual question answering response"""
+
+    answer: Optional[str] = None
+    confidence: Optional[float] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class QueueStatusResponse(BaseResponse):
+    """Queue task status response"""
+
+    task_id: str
+    status: str
+    progress: float = 0.0
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class QueueListResponse(BaseResponse):
+    """Queue task list response"""
+
+    tasks: List[Dict[str, Any]]
+    total: int
 
 
 class InpaintResponse(GenerationResponse):
@@ -214,6 +279,8 @@ class ModelListResponse(BaseResponse):
 
     success: bool = Field(default=True)
     data: Dict[str, Any] = Field(..., description="Available models information")
+    models: List[Dict[str, Any]]
+    categories: List[str]
 
     class ModelListData(BaseModel):
         available_models: List[ModelInfo] = Field(
@@ -224,6 +291,15 @@ class ModelListResponse(BaseResponse):
         )
         total_models: int = Field(..., description="Total number of available models")
         installed_models: int = Field(description="Number of installed models")
+
+
+class ModelLoadResponse(BaseResponse):
+    """Model load response"""
+
+    model_name: str
+    loaded: bool
+    device: str
+    dtype: str
 
 
 class ModelStatusResponse(BaseResponse):
