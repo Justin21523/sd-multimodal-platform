@@ -1440,6 +1440,13 @@ export default function App() {
         return;
       }
 
+      const initAssetId = typeof h.init_asset_id === "string" ? h.init_asset_id : "";
+      const maskAssetIdLocal = typeof h.mask_asset_id === "string" ? h.mask_asset_id : "";
+      const controlAssetIdLocal = typeof h.control_asset_id === "string" ? h.control_asset_id : "";
+      const initFromAsset = !!initAssetId;
+      const maskFromAsset = !!maskAssetIdLocal;
+      const controlFromAsset = !!controlAssetIdLocal;
+
       if (h.mode === "txt2img") {
         const resp = await apiPost<Txt2ImgResponse>("/api/v1/txt2img/", {
           ...baseParams,
@@ -1457,17 +1464,16 @@ export default function App() {
       }
 
       if (h.mode === "img2img") {
-        const init_image = await resolveInit();
         const resp = await apiPost<Img2ImgResponse>("/api/v1/img2img/", {
           ...baseParams,
           user_id: queueUserFilter || "local",
-          init_image,
+          ...(initFromAsset ? { init_asset_id: initAssetId } : { init_image: await resolveInit() }),
           strength: typeof h.strength === "number" ? h.strength : 0.75,
           ...(h.controlnet
             ? {
                 controlnet: {
                   type: h.controlnet.type,
-                  image: await resolveControl(),
+                  ...(controlFromAsset ? { asset_id: controlAssetIdLocal } : { image: await resolveControl() }),
                   preprocess: !!h.controlnet.preprocess,
                   strength: typeof h.controlnet.strength === "number" ? h.controlnet.strength : 1.0
                 }
@@ -1483,8 +1489,8 @@ export default function App() {
       const resp = await apiPost<InpaintResponse>("/api/v1/img2img/inpaint", {
         ...baseParams,
         user_id: queueUserFilter || "local",
-        init_image: await resolveInit(),
-        mask_image: await resolveMask(),
+        ...(initFromAsset ? { init_asset_id: initAssetId } : { init_image: await resolveInit() }),
+        ...(maskFromAsset ? { mask_asset_id: maskAssetIdLocal } : { mask_image: await resolveMask() }),
         strength: typeof h.strength === "number" ? h.strength : 0.75,
         mask_blur: typeof h.mask_blur === "number" ? h.mask_blur : 4,
         inpainting_fill: typeof h.inpainting_fill === "string" ? h.inpainting_fill : "original"
@@ -1667,26 +1673,26 @@ export default function App() {
           control_asset_id: null
         });
       } else if (mode === "img2img") {
-        if (!initImageDataUrl) {
-          setError("請先選擇一張輸入圖片（img2img）");
+        if (!initImageDataUrl && !img2imgAssetId) {
+          setError("請先選擇一張輸入圖片（img2img），或提供 init_asset_id");
           setBusy(false);
           return;
         }
-        if (useControlNet && !controlImageDataUrl) {
-          setError("已開啟 ControlNet，但尚未提供 control image");
+        if (useControlNet && !controlImageDataUrl && !controlAssetId) {
+          setError("已開啟 ControlNet，但尚未提供 control image（或 control asset）");
           setBusy(false);
           return;
         }
         const resp = await apiPost<Img2ImgResponse>("/api/v1/img2img/", {
           ...baseParams,
           user_id: queueUserFilter || "local",
-          init_image: initImageDataUrl,
+          ...(img2imgAssetId ? { init_asset_id: img2imgAssetId } : { init_image: initImageDataUrl }),
           strength: clampFloat(strength, 0.75),
           ...(useControlNet
             ? {
                 controlnet: {
                   type: controlType,
-                  image: controlImageDataUrl,
+                  ...(controlAssetId ? { asset_id: controlAssetId } : { image: controlImageDataUrl }),
                   preprocess: controlPreprocess,
                   strength: clampFloat(controlStrength, 1.0)
                 }
@@ -1714,13 +1720,13 @@ export default function App() {
           control_asset_id: useControlNet ? (controlAssetId || null) : null
         });
       } else {
-        if (!initImageDataUrl) {
-          setError("請先選擇一張輸入圖片（inpaint）");
+        if (!initImageDataUrl && !img2imgAssetId) {
+          setError("請先選擇一張輸入圖片（inpaint），或提供 init_asset_id");
           setBusy(false);
           return;
         }
-        if (!maskImageDataUrl) {
-          setError("請先選擇一張 mask（inpaint）");
+        if (!maskImageDataUrl && !maskAssetId) {
+          setError("請先選擇一張 mask（inpaint），或提供 mask_asset_id");
           setBusy(false);
           return;
         }
@@ -1728,8 +1734,8 @@ export default function App() {
         const resp = await apiPost<InpaintResponse>("/api/v1/img2img/inpaint", {
           ...baseParams,
           user_id: queueUserFilter || "local",
-          init_image: initImageDataUrl,
-          mask_image: maskImageDataUrl,
+          ...(img2imgAssetId ? { init_asset_id: img2imgAssetId } : { init_image: initImageDataUrl }),
+          ...(maskAssetId ? { mask_asset_id: maskAssetId } : { mask_image: maskImageDataUrl }),
           strength: clampFloat(strength, 0.75),
           mask_blur: clampInt(maskBlur, 4),
           inpainting_fill: inpaintFill
