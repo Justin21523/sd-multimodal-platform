@@ -164,3 +164,34 @@ async def test_controlnet_progress_callback_exception_propagates():
         manager.current_pipeline = prior_pipeline
         manager.current_pipeline_key = prior_key
         manager.processors = prior_processors
+
+
+@pytest.mark.unit
+def test_upscale_worker_defines_abort_check_and_passes_to_service():
+    import ast
+    from pathlib import Path
+
+    worker_path = Path(__file__).resolve().parent.parent / "app" / "workers" / "celery_worker.py"
+    source = worker_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    fn = None
+    for node in tree.body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_process_upscale_async":
+            fn = node
+            break
+    assert fn is not None
+
+    has_abort_check_assign = any(
+        isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "abort_check" for t in n.targets)
+        for n in ast.walk(fn)
+    )
+    assert has_abort_check_assign
+
+    has_abort_kw = any(
+        isinstance(n, ast.Call)
+        and any(isinstance(kw, ast.keyword) and kw.arg == "abort_check" for kw in n.keywords)
+        for n in ast.walk(fn)
+    )
+    assert has_abort_kw

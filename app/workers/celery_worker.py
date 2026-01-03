@@ -1635,6 +1635,7 @@ async def _process_upscale_async(
     await _raise_if_task_terminal(task_id)
 
     loop = asyncio.get_running_loop()
+    abort_check = lambda: _threadsafe_raise_if_task_terminal(task_id, loop)
     last_step = {"value": -1}
 
     def _on_tile(step: int, total_steps: int) -> None:
