@@ -1390,16 +1390,43 @@ export default function App() {
         throw new Error("缺少 control image：請先在 Generate 分頁提供 control image，或使用資產庫來源。");
       };
 
+      let initAssetIdLocal = typeof h.init_asset_id === "string" ? h.init_asset_id : "";
+      let maskAssetIdLocal = typeof h.mask_asset_id === "string" ? h.mask_asset_id : "";
+      let controlAssetIdLocal = typeof h.control_asset_id === "string" ? h.control_asset_id : "";
+
       if (h.run_mode === "async") {
         const taskType = h.mode;
-        const initFromAsset = !!h.init_asset_id;
-        const maskFromAsset = !!h.mask_asset_id;
-        const controlFromAsset = !!h.control_asset_id;
+        try {
+          if ((h.mode === "img2img" || h.mode === "inpaint") && !initAssetIdLocal) {
+            const dataUrl = await resolveInit();
+            initAssetIdLocal = await uploadDataUrlAsAssetId(dataUrl, { category: "reference", filename: "init.png" });
+            setImg2imgAssetId(initAssetIdLocal);
+          }
+          if (h.mode === "inpaint" && !maskAssetIdLocal) {
+            const dataUrl = await resolveMask();
+            maskAssetIdLocal = await uploadDataUrlAsAssetId(dataUrl, { category: "mask", filename: "mask.png" });
+            setMaskAssetId(maskAssetIdLocal);
+          }
+          if (h.mode === "img2img" && h.controlnet && !controlAssetIdLocal) {
+            const dataUrl = await resolveControl();
+            const category = suggestedControlCategory(h.controlnet.type);
+            controlAssetIdLocal = await uploadDataUrlAsAssetId(dataUrl, { category, filename: "control.png" });
+            setControlAssetId(controlAssetIdLocal);
+          }
+        } catch (e: any) {
+          setError(`資產上傳失敗：${formatApiError(e)}`);
+          setBusy(false);
+          return;
+        }
+
+        const initFromAsset = !!initAssetIdLocal;
+        const maskFromAsset = !!maskAssetIdLocal;
+        const controlFromAsset = !!controlAssetIdLocal;
         const parameters =
           h.mode === "img2img"
             ? {
                 ...baseParams,
-                ...(initFromAsset ? { init_asset_id: h.init_asset_id } : { init_image: await resolveInit() }),
+                ...(initFromAsset ? { init_asset_id: initAssetIdLocal } : { init_image: await resolveInit() }),
                 strength: typeof h.strength === "number" ? h.strength : 0.75,
                 ...(h.controlnet
                   ? {
@@ -1411,13 +1438,13 @@ export default function App() {
                       }
                     }
                   : {}),
-                ...(h.controlnet && controlFromAsset ? { control_asset_id: h.control_asset_id } : {})
+                ...(h.controlnet && controlFromAsset ? { control_asset_id: controlAssetIdLocal } : {})
               }
             : h.mode === "inpaint"
               ? {
                   ...baseParams,
-                  ...(initFromAsset ? { init_asset_id: h.init_asset_id } : { init_image: await resolveInit() }),
-                  ...(maskFromAsset ? { mask_asset_id: h.mask_asset_id } : { mask_image: await resolveMask() }),
+                  ...(initFromAsset ? { init_asset_id: initAssetIdLocal } : { init_image: await resolveInit() }),
+                  ...(maskFromAsset ? { mask_asset_id: maskAssetIdLocal } : { mask_image: await resolveMask() }),
                   strength: typeof h.strength === "number" ? h.strength : 0.75,
                   mask_blur: typeof h.mask_blur === "number" ? h.mask_blur : 4,
                   inpainting_fill: typeof h.inpainting_fill === "string" ? h.inpainting_fill : "original"
@@ -1432,20 +1459,18 @@ export default function App() {
 	        });
         if (!resp.success || !resp.task_id) {
           setBusy(false);
-          setError(resp.message || "佇列提交失敗");
-          return;
-        }
-        trackTask(resp.task_id);
-        recordHistory(historyEntry);
-        return;
-      }
-
-      const initAssetId = typeof h.init_asset_id === "string" ? h.init_asset_id : "";
-      const maskAssetIdLocal = typeof h.mask_asset_id === "string" ? h.mask_asset_id : "";
-      const controlAssetIdLocal = typeof h.control_asset_id === "string" ? h.control_asset_id : "";
-      const initFromAsset = !!initAssetId;
-      const maskFromAsset = !!maskAssetIdLocal;
-      const controlFromAsset = !!controlAssetIdLocal;
+	          setError(resp.message || "佇列提交失敗");
+	          return;
+	        }
+	        trackTask(resp.task_id);
+	        recordHistory({
+            ...historyEntry,
+            init_asset_id: initAssetIdLocal || null,
+            mask_asset_id: h.mode === "inpaint" ? (maskAssetIdLocal || null) : null,
+            control_asset_id: h.controlnet ? (controlAssetIdLocal || null) : null
+          });
+	        return;
+	      }
 
       if (h.mode === "txt2img") {
         const resp = await apiPost<Txt2ImgResponse>("/api/v1/txt2img/", {
@@ -1464,16 +1489,46 @@ export default function App() {
       }
 
       if (h.mode === "img2img") {
+        let initDataUrl: string | null = null;
+        let controlDataUrl: string | null = null;
+
+        if (!initAssetIdLocal) {
+          initDataUrl = await resolveInit();
+          if (initDataUrl.startsWith("data:")) {
+            try {
+              initAssetIdLocal = await uploadDataUrlAsAssetId(initDataUrl, { category: "reference", filename: "init.png" });
+              setImg2imgAssetId(initAssetIdLocal);
+            } catch (e) {
+              console.warn("Failed to upload init image to assets; falling back to base64", e);
+            }
+          }
+        }
+
+        if (h.controlnet && !controlAssetIdLocal) {
+          controlDataUrl = await resolveControl();
+          if (controlDataUrl.startsWith("data:")) {
+            try {
+              const category = suggestedControlCategory(h.controlnet.type);
+              controlAssetIdLocal = await uploadDataUrlAsAssetId(controlDataUrl, { category, filename: "control.png" });
+              setControlAssetId(controlAssetIdLocal);
+            } catch (e) {
+              console.warn("Failed to upload control image to assets; falling back to base64", e);
+            }
+          }
+        }
+
+        const initFromAsset = !!initAssetIdLocal;
+        const controlFromAsset = !!controlAssetIdLocal;
         const resp = await apiPost<Img2ImgResponse>("/api/v1/img2img/", {
           ...baseParams,
           user_id: queueUserFilter || "local",
-          ...(initFromAsset ? { init_asset_id: initAssetId } : { init_image: await resolveInit() }),
+          ...(initFromAsset ? { init_asset_id: initAssetIdLocal } : { init_image: initDataUrl ?? await resolveInit() }),
           strength: typeof h.strength === "number" ? h.strength : 0.75,
           ...(h.controlnet
             ? {
                 controlnet: {
                   type: h.controlnet.type,
-                  ...(controlFromAsset ? { asset_id: controlAssetIdLocal } : { image: await resolveControl() }),
+                  ...(controlFromAsset ? { asset_id: controlAssetIdLocal } : { image: controlDataUrl ?? await resolveControl() }),
                   preprocess: !!h.controlnet.preprocess,
                   strength: typeof h.controlnet.strength === "number" ? h.controlnet.strength : 1.0
                 }
@@ -1482,22 +1537,61 @@ export default function App() {
         });
         const urls = (resp?.data?.images ?? []).filter((u: any) => typeof u === "string") as string[];
         setImages(urls.map(resolveMediaUrl));
-        recordHistory(historyEntry);
+        recordHistory({
+          ...historyEntry,
+          init_asset_id: initAssetIdLocal || null,
+          mask_asset_id: null,
+          control_asset_id: h.controlnet ? (controlAssetIdLocal || null) : null
+        });
         return;
       }
 
+      let initDataUrl: string | null = null;
+      let maskDataUrl: string | null = null;
+
+      if (!initAssetIdLocal) {
+        initDataUrl = await resolveInit();
+        if (initDataUrl.startsWith("data:")) {
+          try {
+            initAssetIdLocal = await uploadDataUrlAsAssetId(initDataUrl, { category: "reference", filename: "init.png" });
+            setImg2imgAssetId(initAssetIdLocal);
+          } catch (e) {
+            console.warn("Failed to upload init image to assets; falling back to base64", e);
+          }
+        }
+      }
+
+      if (!maskAssetIdLocal) {
+        maskDataUrl = await resolveMask();
+        if (maskDataUrl.startsWith("data:")) {
+          try {
+            maskAssetIdLocal = await uploadDataUrlAsAssetId(maskDataUrl, { category: "mask", filename: "mask.png" });
+            setMaskAssetId(maskAssetIdLocal);
+          } catch (e) {
+            console.warn("Failed to upload mask image to assets; falling back to base64", e);
+          }
+        }
+      }
+
+      const initFromAsset = !!initAssetIdLocal;
+      const maskFromAsset = !!maskAssetIdLocal;
       const resp = await apiPost<InpaintResponse>("/api/v1/img2img/inpaint", {
         ...baseParams,
         user_id: queueUserFilter || "local",
-        ...(initFromAsset ? { init_asset_id: initAssetId } : { init_image: await resolveInit() }),
-        ...(maskFromAsset ? { mask_asset_id: maskAssetIdLocal } : { mask_image: await resolveMask() }),
+        ...(initFromAsset ? { init_asset_id: initAssetIdLocal } : { init_image: initDataUrl ?? await resolveInit() }),
+        ...(maskFromAsset ? { mask_asset_id: maskAssetIdLocal } : { mask_image: maskDataUrl ?? await resolveMask() }),
         strength: typeof h.strength === "number" ? h.strength : 0.75,
         mask_blur: typeof h.mask_blur === "number" ? h.mask_blur : 4,
         inpainting_fill: typeof h.inpainting_fill === "string" ? h.inpainting_fill : "original"
       });
       const urls = (resp?.data?.images ?? []).filter((u: any) => typeof u === "string") as string[];
       setImages(urls.map(resolveMediaUrl));
-      recordHistory(historyEntry);
+      recordHistory({
+        ...historyEntry,
+        init_asset_id: initAssetIdLocal || null,
+        mask_asset_id: maskAssetIdLocal || null,
+        control_asset_id: null
+      });
     } catch (e: any) {
       setError(`重跑失敗：${formatApiError(e)}`);
       setBusy(false);
