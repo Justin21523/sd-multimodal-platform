@@ -35,6 +35,29 @@ async def test_task_store_publishes_user_task_event_channel_and_payload():
 
 
 @pytest.mark.unit
+async def test_task_store_publishes_task_event_channel_and_payload():
+    class FakeRedis:
+        publish = AsyncMock(return_value=1)
+
+    store = RedisTaskStore("redis://localhost:6379/0")
+    store.redis_client = FakeRedis()
+
+    task_info = TaskInfo(
+        task_id="task_123",
+        task_type="txt2img",
+        status=TaskStatus.PENDING,
+        priority=TaskPriority.NORMAL,
+        user_id="user_abc",
+    )
+
+    await store._publish_task_event(task_info)
+
+    channel, payload = store.redis_client.publish.await_args.args  # type: ignore[attr-defined]
+    assert channel == "task:task_123:events"
+    assert json.loads(payload) == {"task_id": "task_123"}
+
+
+@pytest.mark.unit
 async def test_sse_user_stream_consumes_pubsub_events_for_updates():
     class FakePubSub:
         def __init__(self):
@@ -210,7 +233,7 @@ async def test_sse_task_stream_consumes_pubsub_events_for_updates():
     second = await anext(iterator)
     await iterator.aclose()
 
-    assert pubsub.subscribed == ["user:user_abc:events"]
+    assert pubsub.subscribed == ["task:task_1:events"]
 
     assert isinstance(first, str) and first.startswith("data: ")
     payload_1 = json.loads(first[len("data: ") :].strip())

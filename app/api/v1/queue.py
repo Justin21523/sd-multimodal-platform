@@ -663,19 +663,16 @@ async def stream_task_status(
             yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
             return
 
-        # Subscribe to user:{user_id}:events when possible; fallback to polling otherwise.
+        # Subscribe to task:{task_id}:events when possible; fallback to polling otherwise.
         try:
-            if task_info.user_id:
-                task_store = getattr(queue_manager, "task_store", None)
-                redis_client = (
-                    getattr(task_store, "redis_client", None) if task_store else None
-                )
-                if redis_client is not None and hasattr(redis_client, "pubsub"):
-                    pubsub = redis_client.pubsub()
-                    prefix = getattr(task_store, "user_tasks_prefix", "user:")
-                    suffix = getattr(task_store, "user_events_suffix", ":events")
-                    channel = f"{prefix}{task_info.user_id}{suffix}"
-                    await _pubsub_subscribe(pubsub, channel)
+            task_store = getattr(queue_manager, "task_store", None)
+            redis_client = getattr(task_store, "redis_client", None) if task_store else None
+            if redis_client is not None and hasattr(redis_client, "pubsub"):
+                pubsub = redis_client.pubsub()
+                prefix = getattr(task_store, "task_prefix", "task:")
+                suffix = getattr(task_store, "task_events_suffix", ":events")
+                channel = f"{prefix}{task_id}{suffix}"
+                await _pubsub_subscribe(pubsub, channel)
         except Exception:
             pubsub = None
             channel = None
