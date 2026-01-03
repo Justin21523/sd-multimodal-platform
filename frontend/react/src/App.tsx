@@ -1741,15 +1741,61 @@ export default function App() {
     }
   }
 
+  async function uploadImageUrlAsAssetId(imageUrl: string, opts?: { category?: string; tags?: string[]; description?: string }) {
+    const fetchUrl = resolveMediaUrl(imageUrl);
+    const resp = await fetch(fetchUrl, { method: "GET" });
+    if (!resp.ok) throw new Error(`Failed to fetch image: ${resp.status}`);
+    const blob = await resp.blob();
+
+    let filename = "";
+    try {
+      const u = new URL(fetchUrl, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+      filename = u.pathname.split("/").pop() || "";
+    } catch {
+      filename = fetchUrl.split("?")[0].split("#")[0].split("/").pop() || "";
+    }
+
+    const mime = String(blob.type || "").toLowerCase();
+    const extFromMime =
+      mime === "image/png"
+        ? ".png"
+        : mime === "image/jpeg"
+          ? ".jpg"
+          : mime === "image/webp"
+            ? ".webp"
+            : mime === "image/gif"
+              ? ".gif"
+              : ".png";
+
+    filename = filename.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+/, "");
+    if (!filename) filename = `image${extFromMime}`;
+    if (!filename.includes(".")) filename = `${filename}${extFromMime}`;
+
+    const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
+    const form = new FormData();
+    form.append("files", file, file.name);
+    form.append("category", opts?.category || "reference");
+    form.append("tags", (opts?.tags ?? []).join(","));
+    if (opts?.description) form.append("descriptions", opts.description);
+
+    const uploaded = await apiPostForm<any>("/api/v1/assets/upload", form);
+    const first = uploaded?.data?.uploaded_assets?.[0];
+    const assetId = first?.asset_id;
+    if (!uploaded?.success || typeof assetId !== "string" || !assetId) {
+      throw new Error(uploaded?.message || "匯入資產失敗");
+    }
+    return assetId;
+  }
+
   async function handleUpscaleFromUrl(imageUrl: string, scale: number) {
     setError("");
     setStatus(null);
     setBusy(true);
 
     try {
-      if (runMode === "async") {
-        const userId = queueUserFilter || "local";
-        if (isOutputsUrl(imageUrl)) {
+	      if (runMode === "async") {
+	        const userId = queueUserFilter || "local";
+	        if (isOutputsUrl(imageUrl)) {
           const imported = await apiPost<any>("/api/v1/assets/import_from_output", {
             image_url: imageUrl,
             category: "reference",
@@ -1772,18 +1818,18 @@ export default function App() {
             setError(resp.message || "佇列提交失敗");
             return;
           }
-          trackTask(resp.task_id);
-          return;
-        }
+	          trackTask(resp.task_id);
+	          return;
+	        }
 
-        const dataUrl = await urlToDataUrl(imageUrl);
-        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
-          task_type: "upscale",
-          parameters: { image: dataUrl, scale, model: "RealESRGAN_x4plus" },
-          priority: "normal",
-          user_id: userId
-        });
-        if (!resp.success || !resp.task_id) {
+	        const assetId = await uploadImageUrlAsAssetId(imageUrl, { category: "reference" });
+	        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
+	          task_type: "upscale",
+	          parameters: { image_asset_id: assetId, scale, model: "RealESRGAN_x4plus" },
+	          priority: "normal",
+	          user_id: userId
+	        });
+	        if (!resp.success || !resp.task_id) {
           setBusy(false);
           setError(resp.message || "佇列提交失敗");
           return;
@@ -1817,9 +1863,9 @@ export default function App() {
     setBusy(true);
 
     try {
-      if (runMode === "async") {
-        const userId = queueUserFilter || "local";
-        if (isOutputsUrl(imageUrl)) {
+	      if (runMode === "async") {
+	        const userId = queueUserFilter || "local";
+	        if (isOutputsUrl(imageUrl)) {
           const imported = await apiPost<any>("/api/v1/assets/import_from_output", {
             image_url: imageUrl,
             category: "reference",
@@ -1842,18 +1888,18 @@ export default function App() {
             setError(resp.message || "佇列提交失敗");
             return;
           }
-          trackTask(resp.task_id);
-          return;
-        }
+	          trackTask(resp.task_id);
+	          return;
+	        }
 
-        const dataUrl = await urlToDataUrl(imageUrl);
-        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
-          task_type: "face_restore",
-          parameters: { image: dataUrl, model: "GFPGAN_v1.4", upscale: 2 },
-          priority: "normal",
-          user_id: userId
-        });
-        if (!resp.success || !resp.task_id) {
+	        const assetId = await uploadImageUrlAsAssetId(imageUrl, { category: "reference" });
+	        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
+	          task_type: "face_restore",
+	          parameters: { image_asset_id: assetId, model: "GFPGAN_v1.4", upscale: 2 },
+	          priority: "normal",
+	          user_id: userId
+	        });
+	        if (!resp.success || !resp.task_id) {
           setBusy(false);
           setError(resp.message || "佇列提交失敗");
           return;
