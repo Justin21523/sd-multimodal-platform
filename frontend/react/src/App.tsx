@@ -400,6 +400,8 @@ export default function App() {
   const [queuePage, setQueuePage] = useState<number>(1);
   const [queuePageSize, setQueuePageSize] = useState<number>(20);
   const [queueLoading, setQueueLoading] = useState(false);
+  const queueTasksStreamRef = useRef<EventSource | null>(null);
+  const [queueTasksStreamOk, setQueueTasksStreamOk] = useState(false);
 
   // Assets
   const [assetCategories, setAssetCategories] = useState<Record<string, number>>({});
@@ -693,6 +695,107 @@ export default function App() {
   }, [runMode, queueUserFilter]);
 
   useEffect(() => {
+    if (tab !== "queue" || runMode !== "async" || !queueAutoRefresh) {
+      const existing = queueTasksStreamRef.current;
+      if (existing) {
+        try {
+          existing.close();
+        } catch {
+          // ignore
+        }
+      }
+      queueTasksStreamRef.current = null;
+      setQueueTasksStreamOk(false);
+      return;
+    }
+
+    if (typeof window === "undefined" || !("EventSource" in window)) return;
+
+    let cancelled = false;
+    let es: EventSource | null = null;
+
+    try {
+      es = new EventSource(resolveMediaUrl("/api/v1/queue/stream/tasks"));
+      queueTasksStreamRef.current = es;
+
+      es.onopen = () => {
+        if (cancelled) return;
+        setQueueTasksStreamOk(true);
+      };
+
+      es.onmessage = (ev) => {
+        if (cancelled) return;
+        try {
+          const parsed = JSON.parse(String(ev.data ?? "{}")) as QueueTaskStatus;
+          if (!parsed || typeof parsed.task_id !== "string") return;
+
+          setQueueTasks((prev) => {
+            if (!prev) return prev;
+            const idx = prev.tasks.findIndex((t) => t.task_id === parsed.task_id);
+            if (idx < 0) return prev;
+            const current = prev.tasks[idx];
+            const totalSteps = (parsed as any).total_steps;
+            const nextTask: QueueTask = {
+              ...current,
+              status: typeof parsed.status === "string" ? parsed.status : current.status,
+              progress_percent: typeof parsed.progress_percent === "number" ? parsed.progress_percent : current.progress_percent,
+              current_step: typeof parsed.current_step === "string" ? parsed.current_step : current.current_step,
+              result_data: parsed.result_data ?? current.result_data,
+              error_info: parsed.error_info ?? current.error_info,
+              total_steps: typeof totalSteps === "number" ? totalSteps : current.total_steps
+            };
+            const tasks = [...prev.tasks];
+            tasks[idx] = nextTask;
+            return { ...prev, tasks };
+          });
+          setQueueSelectedTask((prev) => {
+            if (!prev) return prev;
+            if (prev.task_id !== parsed.task_id) return prev;
+            const totalSteps = (parsed as any).total_steps;
+            return {
+              ...prev,
+              status: typeof parsed.status === "string" ? parsed.status : prev.status,
+              progress_percent: typeof parsed.progress_percent === "number" ? parsed.progress_percent : prev.progress_percent,
+              current_step: typeof parsed.current_step === "string" ? parsed.current_step : prev.current_step,
+              result_data: parsed.result_data ?? prev.result_data,
+              error_info: parsed.error_info ?? prev.error_info,
+              total_steps: typeof totalSteps === "number" ? totalSteps : prev.total_steps
+            };
+          });
+        } catch {
+          // ignore
+        }
+      };
+
+      es.onerror = () => {
+        if (cancelled) return;
+        setQueueTasksStreamOk(false);
+        try {
+          es?.close();
+        } catch {
+          // ignore
+        }
+        if (queueTasksStreamRef.current === es) queueTasksStreamRef.current = null;
+      };
+    } catch {
+      // ignore
+    }
+
+    return () => {
+      cancelled = true;
+      setQueueTasksStreamOk(false);
+      if (es) {
+        try {
+          es.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (queueTasksStreamRef.current === es) queueTasksStreamRef.current = null;
+    };
+  }, [tab, runMode, queueAutoRefresh]);
+
+  useEffect(() => {
     const prev = inpaintPrevInitRef.current;
     inpaintPrevInitRef.current = initImageDataUrl;
     if (mode !== "inpaint") return;
@@ -823,13 +926,13 @@ export default function App() {
         cancelled = true;
       };
     }
-    const intervalMs = runMode === "async" ? 10000 : 2000;
+    const intervalMs = runMode === "async" ? (queueTasksStreamOk ? 60000 : 10000) : 2000;
     const i = window.setInterval(refresh, intervalMs);
     return () => {
       cancelled = true;
       window.clearInterval(i);
     };
-  }, [tab, queueAutoRefresh, queuePage, queuePageSize, queueStatusFilter, queueUserFilter, runMode]);
+  }, [tab, queueAutoRefresh, queuePage, queuePageSize, queueStatusFilter, queueUserFilter, runMode, queueTasksStreamOk]);
 
   useEffect(() => {
     if (tab !== "assets") return;
