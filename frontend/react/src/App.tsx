@@ -1543,14 +1543,38 @@ export default function App() {
           return;
         }
 
-        const initFromAsset = !!img2imgAssetId;
-        const maskFromAsset = !!maskAssetId;
-        const controlFromAsset = !!controlAssetId;
+        let initAssetId = img2imgAssetId;
+        let maskAssetIdLocal = maskAssetId;
+        let controlAssetIdLocal = controlAssetId;
+
+        try {
+          if ((mode === "img2img" || mode === "inpaint") && !initAssetId) {
+            initAssetId = await uploadDataUrlAsAssetId(initImageDataUrl, { category: "reference", filename: "init.png" });
+            setImg2imgAssetId(initAssetId);
+          }
+          if (mode === "inpaint" && !maskAssetIdLocal) {
+            maskAssetIdLocal = await uploadDataUrlAsAssetId(maskImageDataUrl, { category: "mask", filename: "mask.png" });
+            setMaskAssetId(maskAssetIdLocal);
+          }
+          if (mode === "img2img" && useControlNet && !controlAssetIdLocal) {
+            const category = controlAssetCategory || "reference";
+            controlAssetIdLocal = await uploadDataUrlAsAssetId(controlImageDataUrl, { category, filename: "control.png" });
+            setControlAssetId(controlAssetIdLocal);
+          }
+        } catch (e: any) {
+          setError(`資產上傳失敗：${formatApiError(e)}`);
+          setBusy(false);
+          return;
+        }
+
+        const initFromAsset = !!initAssetId;
+        const maskFromAsset = !!maskAssetIdLocal;
+        const controlFromAsset = !!controlAssetIdLocal;
         const parameters =
           mode === "img2img"
             ? {
                 ...baseParams,
-                ...(initFromAsset ? { init_asset_id: img2imgAssetId } : { init_image: initImageDataUrl }),
+                ...(initFromAsset ? { init_asset_id: initAssetId } : { init_image: initImageDataUrl }),
                 strength: clampFloat(strength, 0.75),
                 ...(useControlNet
                   ? {
@@ -1562,13 +1586,13 @@ export default function App() {
                       }
                     }
                   : {}),
-                ...(useControlNet && controlFromAsset ? { control_asset_id: controlAssetId } : {})
+                ...(useControlNet && controlFromAsset ? { control_asset_id: controlAssetIdLocal } : {})
               }
             : mode === "inpaint"
               ? {
                   ...baseParams,
-                  ...(initFromAsset ? { init_asset_id: img2imgAssetId } : { init_image: initImageDataUrl }),
-                  ...(maskFromAsset ? { mask_asset_id: maskAssetId } : { mask_image: maskImageDataUrl }),
+                  ...(initFromAsset ? { init_asset_id: initAssetId } : { init_image: initImageDataUrl }),
+                  ...(maskFromAsset ? { mask_asset_id: maskAssetIdLocal } : { mask_image: maskImageDataUrl }),
                   strength: clampFloat(strength, 0.75),
                   mask_blur: clampInt(maskBlur, 4),
                   inpainting_fill: inpaintFill
@@ -1602,16 +1626,16 @@ export default function App() {
           strength: mode === "txt2img" ? undefined : clampFloat(strength, 0.75),
           mask_blur: mode === "inpaint" ? clampInt(maskBlur, 4) : undefined,
           inpainting_fill: mode === "inpaint" ? inpaintFill : undefined,
-          controlnet:
-            mode === "img2img" && useControlNet
-              ? { type: controlType, strength: clampFloat(controlStrength, 1.0), preprocess: controlPreprocess }
-              : null,
-          init_asset_id: mode === "img2img" || mode === "inpaint" ? (img2imgAssetId || null) : null,
-          mask_asset_id: mode === "inpaint" ? (maskAssetId || null) : null,
-          control_asset_id: mode === "img2img" && useControlNet ? (controlAssetId || null) : null
-        });
-        return;
-      }
+	          controlnet:
+	            mode === "img2img" && useControlNet
+	              ? { type: controlType, strength: clampFloat(controlStrength, 1.0), preprocess: controlPreprocess }
+	              : null,
+	          init_asset_id: mode === "img2img" || mode === "inpaint" ? (initAssetId || null) : null,
+	          mask_asset_id: mode === "inpaint" ? (maskAssetIdLocal || null) : null,
+	          control_asset_id: mode === "img2img" && useControlNet ? (controlAssetIdLocal || null) : null
+	        });
+	        return;
+	      }
 
       if (mode === "txt2img") {
         const resp = await apiPost<Txt2ImgResponse>("/api/v1/txt2img/", {
@@ -1767,6 +1791,50 @@ export default function App() {
               ? ".gif"
               : ".png";
 
+    filename = filename.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+/, "");
+    if (!filename) filename = `image${extFromMime}`;
+    if (!filename.includes(".")) filename = `${filename}${extFromMime}`;
+
+    const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
+    const form = new FormData();
+    form.append("files", file, file.name);
+    form.append("category", opts?.category || "reference");
+    form.append("tags", (opts?.tags ?? []).join(","));
+    if (opts?.description) form.append("descriptions", opts.description);
+
+    const uploaded = await apiPostForm<any>("/api/v1/assets/upload", form);
+    const first = uploaded?.data?.uploaded_assets?.[0];
+    const assetId = first?.asset_id;
+    if (!uploaded?.success || typeof assetId !== "string" || !assetId) {
+      throw new Error(uploaded?.message || "匯入資產失敗");
+    }
+    return assetId;
+  }
+
+  async function uploadDataUrlAsAssetId(
+    dataUrl: string,
+    opts?: { category?: string; filename?: string; tags?: string[]; description?: string }
+  ) {
+    const src = String(dataUrl ?? "").trim();
+    if (!src || !src.startsWith("data:")) throw new Error("Missing data URL");
+
+    const resp = await fetch(src, { method: "GET" });
+    if (!resp.ok) throw new Error(`Failed to fetch image: ${resp.status}`);
+    const blob = await resp.blob();
+
+    const mime = String(blob.type || "").toLowerCase();
+    const extFromMime =
+      mime === "image/png"
+        ? ".png"
+        : mime === "image/jpeg"
+          ? ".jpg"
+          : mime === "image/webp"
+            ? ".webp"
+            : mime === "image/gif"
+              ? ".gif"
+              : ".png";
+
+    let filename = (opts?.filename || `image${extFromMime}`).trim();
     filename = filename.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+/, "");
     if (!filename) filename = `image${extFromMime}`;
     if (!filename.includes(".")) filename = `${filename}${extFromMime}`;
