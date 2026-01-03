@@ -10,10 +10,7 @@ from typing import Dict, Any, Optional, Union, List
 from diffusers.models.attention_processor import (
     AttnProcessor2_0,
 )  # Import SDPA processor
-from utils.logging_utils import setup_logging, get_request_logger
-
-# Set up logging
-setup_logging()
+from utils.logging_utils import get_request_logger
 logger = logging.getLogger(__name__)
 
 

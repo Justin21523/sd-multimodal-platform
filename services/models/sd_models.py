@@ -8,7 +8,7 @@ import logging
 import gc
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union, Tuple
+from typing import Optional, Dict, Any, List, Union, Tuple, Callable
 import torch
 from PIL import Image
 
@@ -59,7 +59,7 @@ class ModelRegistry:
         "sdxl-base": {
             "name": "Stable Diffusion XL Base",
             "pipeline_class": StableDiffusionXLPipeline,
-            "local_path": "sdxl/sdxl-base",
+            "local_path": "stable-diffusion/sdxl-base",
             "default_resolution": (1024, 1024),
             "vram_requirement": 8,
             "strengths": ["photorealistic", "commercial", "advertising", "high-detail"],
@@ -99,7 +99,7 @@ class ModelRegistry:
         "sdxl-base": {
             "name": "Stable Diffusion XL Base",
             "path": "stabilityai/stable-diffusion-xl-base-1.0",
-            "local_path": "sdxl/sdxl-base",
+            "local_path": "stable-diffusion/sdxl-base",
             "type": "sdxl",
             "capabilities": ["txt2img", "img2img", "inpaint"],
             "strengths": ["photoreal", "high-quality", "commercial", "advertisement"],
@@ -215,7 +215,11 @@ class ModelRegistry:
         """Get optimal dimensions for model"""
         model_info = cls.get_model_info(model_id)
         if model_info:
-            return model_info.get("optimal_resolution", (512, 512))
+            if "optimal_resolution" in model_info:
+                return model_info.get("optimal_resolution", (512, 512))
+            if "default_resolution" in model_info:
+                return model_info.get("default_resolution", (512, 512))
+            return model_info.get("resolution", (512, 512))
         return (512, 512)
 
 
@@ -254,7 +258,8 @@ class ModelManager:
         self.startup_time: float = 0.0
         self.last_optimization_info: Dict[str, Any] = {}
         self.model_cache: Dict[str, Any] = {}  # For future multi-model caching
-        self.base_models_path = Path(settings.OUTPUT_PATH).parent / "models"
+        # Models MUST live under /mnt/c/ai_models per ~/Desktop/data_model_structure.md
+        self.base_models_path = Path(settings.MODELS_PATH)
 
         # Performance tracking
         self.model_load_times: Dict[str, float] = {}
@@ -323,12 +328,23 @@ class ModelManager:
     async def _load_model(self, model_id: str) -> bool:
         """Load specific model with all pipeline variants"""
         try:
-            model_info = ModelRegistry.get_model_info(model_id)
+            model_info = ModelRegistry.AVAILABLE_MODELS.get(model_id)
             if not model_info:
                 raise ValueError(f"Unknown model: {model_id}")
 
             start_time = time.time()
-            model_path = model_info["path"]
+            local_rel = model_info.get("local_path")
+            local_abs = (
+                (self.base_models_path / local_rel).resolve()
+                if isinstance(local_rel, str) and local_rel
+                else None
+            )
+            if not local_abs or not local_abs.exists():
+                raise FileNotFoundError(
+                    f"Model files not found at: {local_abs}. Run `python scripts/install_models.py` to install under {self.base_models_path}"
+                )
+
+            model_path = str(local_abs)
             model_type = model_info["type"]
 
             logger.info(f"🔄 Loading model: {model_id} ({model_type})")
@@ -346,8 +362,10 @@ class ModelManager:
             self._apply_optimizations()
 
             # Update state
+            self.current_model_id = model_id
             self.current_model = model_id
             self.current_model_path = model_path
+            self.is_initialized = True
             load_time = time.time() - start_time
             self.model_load_times[model_id] = load_time
 
@@ -415,6 +433,18 @@ class ModelManager:
             requires_safety_checker=False,
         )
 
+        # Inpainting pipeline (shared components)
+        self.current_inpaint_pipeline = StableDiffusionInpaintPipeline(
+            vae=self.current_pipeline.vae,
+            text_encoder=self.current_pipeline.text_encoder,
+            tokenizer=self.current_pipeline.tokenizer,
+            unet=self.current_pipeline.unet,
+            scheduler=self.current_pipeline.scheduler,
+            safety_checker=None,  # type: ignore
+            feature_extractor=self.current_pipeline.feature_extractor,  # type: ignore
+            requires_safety_checker=False,
+        )
+
     def _apply_optimizations(self):
         """Apply performance optimizations to all pipelines"""
         pipelines = [
@@ -472,6 +502,8 @@ class ModelManager:
         guidance_scale: float = 7.5,
         seed: int = None,  # type: ignore
         num_images: int = 1,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        callback_steps: int = 1,
     ) -> Dict[str, Any]:
         """
         Generate images using current loaded model.
@@ -520,6 +552,18 @@ class ModelManager:
                     device=self.device
                 ).manual_seed(seed)
 
+            if progress_callback is not None:
+                stride = max(1, int(callback_steps))
+
+                def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
+                    try:
+                        progress_callback(step, num_inference_steps)
+                    except Exception:
+                        pass
+
+                generation_params["callback"] = _cb
+                generation_params["callback_steps"] = stride
+
             gen_logger.info(f"Starting txt2img generation: {width}x{height}")
 
             # Generate
@@ -555,6 +599,8 @@ class ModelManager:
         guidance_scale: float = 7.5,
         seed: int = None,  # type: ignore
         num_images: int = 1,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        callback_steps: int = 1,
     ) -> Dict[str, Any]:
         """Generate images using image-to-image pipeline"""
         if not self.current_img2img_pipeline:
@@ -583,6 +629,18 @@ class ModelManager:
                 generation_params["generator"] = torch.Generator(
                     device=self.device
                 ).manual_seed(seed)
+
+            if progress_callback is not None:
+                stride = max(1, int(callback_steps))
+
+                def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
+                    try:
+                        progress_callback(step, num_inference_steps)
+                    except Exception:
+                        pass
+
+                generation_params["callback"] = _cb
+                generation_params["callback_steps"] = stride
 
             gen_logger.info(f"Starting img2img generation: strength={strength}")
 
@@ -620,6 +678,8 @@ class ModelManager:
         guidance_scale: float = 7.5,
         seed: Optional[int] = None,
         num_images: int = 1,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        callback_steps: int = 1,
     ) -> Dict[str, Any]:
         """Generate images using inpainting pipeline"""
         if not self.current_inpaint_pipeline:
@@ -649,6 +709,18 @@ class ModelManager:
                 generation_params["generator"] = torch.Generator(
                     device=self.device
                 ).manual_seed(seed)
+
+            if progress_callback is not None:
+                stride = max(1, int(callback_steps))
+
+                def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
+                    try:
+                        progress_callback(step, num_inference_steps)
+                    except Exception:
+                        pass
+
+                generation_params["callback"] = _cb
+                generation_params["callback_steps"] = stride
 
             gen_logger.info(f"Starting inpaint generation: strength={strength}")
 
@@ -716,7 +788,12 @@ class ModelManager:
 
     def get_model_status(self) -> Dict[str, Any]:
         """Get current model status and statistics"""
+        return self.get_status()
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return a stable status payload for API/tests."""
         return {
+            "current_model_id": self.current_model_id,
             "current_model": self.current_model,
             "current_model_path": self.current_model_path,
             "is_initialized": self.is_initialized,

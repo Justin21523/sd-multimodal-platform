@@ -307,27 +307,39 @@ def setup_logging(
     console_handler.setFormatter(HumanReadableFormatter())
     root_logger.addHandler(console_handler)
 
-    # Use settings or defaults
+    # Resolve effective level/path
     if log_level is None:
         log_level = getattr(settings, "LOG_LEVEL", "INFO")
 
-    if log_file is None:
-        # Create logs directory if it doesn't exist
-        log_dir = Path("logs")
-        log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / "app.log"  # type: ignore[attr-defined]
+    resolved_log_file = log_file or getattr(settings, "LOG_FILE_PATH", None)
+    if resolved_log_file:
+        log_path = Path(resolved_log_file)
+    else:
+        # Fallback (should be avoided on this workstation)
+        log_path = Path("logs") / "app.log"
 
-    # File handler with JSON format
+    file_logging_enabled = False
     try:
-        file_handler = RotatingFileHandler(
-            log_dir / "app.log", maxBytes=10 * 1024 * 1024, backupCount=5  # type: ignore[arg-type]
-        )  # 10MB
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(StructuredFormatter())
-        root_logger.addHandler(file_handler)
-
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_logging_enabled = True
     except Exception as e:
-        root_logger.warning(f"Failed to setup file logging: {e}")
+        root_logger.warning(
+            f"Log directory not writable; using console-only logging: {e}"
+        )
+
+    if file_logging_enabled:
+        # File handler with JSON format
+        try:
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+            )  # 10MB
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(StructuredFormatter())
+            root_logger.addHandler(file_handler)
+        except Exception as e:
+            root_logger.warning(f"Failed to setup file logging: {e}")
 
     # Set specific logger levels
     # Suppress overly verbose libraries
@@ -340,7 +352,7 @@ def setup_logging(
         "Logging system initialized",
         extra={
             "log_level": log_level,
-            "log_file": str(log_file),
+            "log_file": str(log_path) if file_logging_enabled else None,
             "json_enabled": enable_json,
         },
     )
@@ -500,5 +512,4 @@ def log_error_with_context(
     logger.error(f"Error occurred: {str(error)}", extra=extra, exc_info=True)
 
 
-# Initialize logging when module is imported
-setup_logging()
+# Do not auto-configure logging on import; app/main.py should call setup_logging().

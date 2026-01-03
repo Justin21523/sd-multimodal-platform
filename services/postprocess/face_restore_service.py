@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, List, Tuple
+from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 import torch
 from PIL import Image
 
@@ -20,11 +20,6 @@ except ImportError:
     GFPGAN_AVAILABLE = False
 
 
-# Try to import CodeFormer
-from codeformer import CodeFormer
-CODEFORMER_AVAILABLE = True
-
-
 from app.config import settings
 from utils.logging_utils import get_logger
 from utils.image_utils import ImageProcessor
@@ -33,23 +28,20 @@ from utils.metadata_utils import ImageMetadata, MetadataManager
 
 logger = get_logger(__name__)
 
-# 正確的 CodeFormer 導入和使用
 try:
-    import sys
-    import os
-    from basicsr.utils import imwrite
-
-    # CodeFormer 的正確導入方式
-    codeformer_path = "path/to/CodeFormer"  # CodeFormer 專案路徑
-    if codeformer_path not in sys.path:
-        sys.path.append(codeformer_path)
-
-    from codeformer import CodeFormer as CodeFormerModel
-    from facelib.utils.face_restoration_helper import FaceRestoreHelper
+    from basicsr.utils import imwrite  # type: ignore
+    from basicsr.utils.img_util import img2tensor, tensor2img  # type: ignore
+    from torchvision.transforms.functional import normalize  # type: ignore
+    from facelib.utils.face_restoration_helper import FaceRestoreHelper  # type: ignore
+    from codeformer import CodeFormer as CodeFormerModel  # type: ignore
     CODEFORMER_AVAILABLE = True
-except ImportError:
-    CodeFormerModel = None
-    FaceRestoreHelper = None
+except Exception:  # pragma: no cover
+    imwrite = None  # type: ignore
+    img2tensor = None  # type: ignore
+    tensor2img = None  # type: ignore
+    normalize = None  # type: ignore
+    CodeFormerModel = None  # type: ignore
+    FaceRestoreHelper = None  # type: ignore
     CODEFORMER_AVAILABLE = False
 
 class CodeFormerWrapper:
@@ -65,6 +57,8 @@ class CodeFormerWrapper:
         """初始化 CodeFormer 模型"""
         if not CODEFORMER_AVAILABLE:
             raise ImportError("CodeFormer not available")
+        if any(x is None for x in (CodeFormerModel, FaceRestoreHelper, img2tensor, tensor2img, normalize)):
+            raise ImportError("CodeFormer dependencies not available")
 
         # 載入 CodeFormer 模型
         self.net = CodeFormerModel( # type: ignore
@@ -96,7 +90,9 @@ class CodeFormerWrapper:
                 w: float = 0.5,  # 保真度權重，不是 fidelity_weight
                 has_aligned: bool = False,
                 only_center_face: bool = False,
-                paste_back: bool = True):
+                paste_back: bool = True,
+                progress_callback: Optional[Callable[[int, int], None]] = None,
+                abort_check: Optional[Callable[[], None]] = None):
         """
         增強圖像中的人臉
 
@@ -110,6 +106,9 @@ class CodeFormerWrapper:
         Returns:
             (cropped_faces, restored_faces, restored_img)
         """
+
+        if abort_check is not None:
+            abort_check()
 
         self.face_helper.clean_all() # type: ignore
         self.face_helper.read_image(img_array) # type: ignore
@@ -125,7 +124,10 @@ class CodeFormerWrapper:
         self.face_helper.align_warp_face() # type: ignore
 
         # 復原每個檢測到的人臉
-        for cropped_face in self.face_helper.cropped_faces: # type: ignore
+        total_faces = len(self.face_helper.cropped_faces)  # type: ignore[arg-type]
+        for face_index, cropped_face in enumerate(self.face_helper.cropped_faces): # type: ignore
+            if abort_check is not None:
+                abort_check()
             # 預處理
             cropped_face_t = img2tensor(cropped_face / 255., bgr2rgb=True, float32=True)
             normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
@@ -143,6 +145,12 @@ class CodeFormerWrapper:
 
             restored_face = restored_face.astype('uint8')
             self.face_helper.add_restored_face(restored_face) # type: ignore
+
+            if progress_callback is not None and total_faces > 0:
+                try:
+                    progress_callback(face_index, total_faces)
+                except Exception:
+                    pass
 
         # 貼回原圖
         if paste_back:
@@ -173,11 +181,13 @@ class FaceRestoreService:
         self.restorer = None
         self.device = settings.DEVICE
 
+        weights_dir = Path(settings.FACE_RESTORE_MODELS_PATH)
+
         # Available models
         self.available_models = {
             "GFPGAN_v1.4": {
                 "model_name": "GFPGAN_v1.4",
-                "model_path": "weights/GFPGANv1.4.pth",
+                "model_path": str(weights_dir / "GFPGANv1.4.pth"),
                 "arch": "clean",
                 "channel_multiplier": 2,
                 "upscale": 2,
@@ -185,7 +195,7 @@ class FaceRestoreService:
             },
             "GFPGAN_v1.3": {
                 "model_name": "GFPGAN_v1.3",
-                "model_path": "weights/GFPGANv1.3.pth",
+                "model_path": str(weights_dir / "GFPGANv1.3.pth"),
                 "arch": "clean",
                 "channel_multiplier": 2,
                 "upscale": 2,
@@ -193,14 +203,14 @@ class FaceRestoreService:
             },
             "CodeFormer": {
                 "model_name": "CodeFormer",
-                "model_path": "weights/codeformer.pth",
+                "model_path": str(weights_dir / "codeformer.pth"),
                 "arch": "CodeFormer",
                 "upscale": 2,
                 "fidelity_weight": 0.5,
             },
             "RestoreFormer": {
                 "model_name": "RestoreFormer",
-                "model_path": "weights/RestoreFormer.pth",
+                "model_path": str(weights_dir / "RestoreFormer.pth"),
                 "arch": "RestoreFormer",
                 "upscale": 2,
             },
@@ -227,6 +237,10 @@ class FaceRestoreService:
                 logger.warning(
                     "Neither GFPGAN nor CodeFormer available, using fallback"
                 )
+                try:
+                    self.current_model = self._normalize_model_name(model_name)
+                except Exception:
+                    self.current_model = "GFPGAN_v1.4"
                 self.is_initialized = True
                 return
 
@@ -249,13 +263,91 @@ class FaceRestoreService:
             logger.error(f"❌ Failed to initialize Face Restore service: {e}")
             raise
 
+    def _resolve_weights_path(self, model_key: str, expected_path: Path) -> Path:
+        """Resolve model weights path, supporting legacy installer layouts."""
+        if expected_path.exists():
+            return expected_path
+
+        models_root = Path(settings.MODELS_PATH)
+        face_weights_dir = Path(settings.FACE_RESTORE_MODELS_PATH)
+
+        candidates = []
+        if model_key.startswith("GFPGAN"):
+            candidates.extend(
+                [
+                    face_weights_dir
+                    / "gfpgan"
+                    / "experiments"
+                    / "pretrained_models"
+                    / expected_path.name,
+                    models_root
+                    / "face-restore"
+                    / "gfpgan"
+                    / "experiments"
+                    / "pretrained_models"
+                    / expected_path.name,
+                ]
+            )
+        elif model_key == "CodeFormer":
+            candidates.extend(
+                [
+                    models_root
+                    / "postprocess"
+                    / "codeformer"
+                    / "weights"
+                    / "CodeFormer"
+                    / expected_path.name,
+                    models_root / "postprocess" / "codeformer" / expected_path.name,
+                    face_weights_dir / "codeformer" / expected_path.name,
+                ]
+            )
+        elif model_key == "RestoreFormer":
+            candidates.extend(
+                [
+                    models_root / "postprocess" / "restoreformer" / expected_path.name,
+                    face_weights_dir / "restoreformer" / expected_path.name,
+                ]
+            )
+
+        for candidate in candidates:
+            if candidate.exists():
+                logger.info(f"Using legacy face-restore weight path: {candidate}")
+                return candidate
+
+        raise FileNotFoundError(
+            f"Face restore model weights not found: {expected_path} (expected under {face_weights_dir}). "
+            "Run `python scripts/install_models.py --postprocess gfpgan` (and/or codeformer) to install."
+        )
+
+    def _normalize_model_name(self, model_name: str) -> str:
+        if model_name in self.available_models:
+            return model_name
+
+        key = model_name.strip()
+        lower = key.lower()
+        if lower in {"gfpgan", "gfpgan_v1.4", "gfpganv1.4"}:
+            return "GFPGAN_v1.4"
+        if lower in {"gfpgan_v1.3", "gfpganv1.3"}:
+            return "GFPGAN_v1.3"
+        if lower in {"codeformer", "code-former"}:
+            return "CodeFormer"
+        if lower in {"restoreformer", "restore-former"}:
+            return "RestoreFormer"
+
+        raise ValueError(
+            f"Unknown face restore model: {model_name}. Available: {sorted(self.available_models.keys())}"
+        )
+
     async def _load_model(self, model_name: str):
         """Load specified face restoration model"""
         try:
-            config = self.available_models[model_name]
-            model_path = Path(config["model_path"])
+            model_key = self._normalize_model_name(model_name)
+            config = self.available_models[model_key]
+            model_path = self._resolve_weights_path(
+                model_key, Path(config["model_path"])
+            )
 
-            if "CodeFormer" in model_name and CODEFORMER_AVAILABLE:
+            if "CodeFormer" in model_key and CODEFORMER_AVAILABLE:
                 # 使用修正後的 CodeFormer 包裝器
                 self.restorer = CodeFormerWrapper(
                     model_path=str(model_path),
@@ -263,7 +355,7 @@ class FaceRestoreService:
                 )
                 self.restorer.initialize()
 
-            elif "GFPGAN" in model_name and GFPGAN_AVAILABLE:
+            elif "GFPGAN" in model_key and GFPGAN_AVAILABLE:
                 # GFPGAN 的正確使用方式
                 self.restorer = GFPGANer( # type: ignore
                     model_path=str(model_path),
@@ -273,7 +365,7 @@ class FaceRestoreService:
                     bg_upsampler=None
                 )
 
-            self.current_model = model_name
+            self.current_model = model_key
 
         except Exception as e:
             logger.error(f"Failed to load model {model_name}: {e}")
@@ -361,6 +453,8 @@ class FaceRestoreService:
         paste_back: bool = True,
         weight: float = 0.5,
         user_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        abort_check: Optional[Callable[[], None]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -391,7 +485,14 @@ class FaceRestoreService:
 
             # Switch model if requested
             if model_name and model_name != self.current_model:
-                await self._load_model(model_name)
+                if GFPGAN_AVAILABLE or CODEFORMER_AVAILABLE:
+                    await self._load_model(model_name)
+                else:
+                    # Fallback mode: keep metadata in sync without loading weights.
+                    try:
+                        self.current_model = self._normalize_model_name(model_name)
+                    except Exception:
+                        self.current_model = model_name
 
             logger.info(
                 f"👤 Starting face restoration: {input_image.width}x{input_image.height}"
@@ -402,6 +503,8 @@ class FaceRestoreService:
                 GFPGAN_AVAILABLE or CODEFORMER_AVAILABLE
             ):
                 # Mock restoration for testing
+                if abort_check is not None:
+                    abort_check()
                 restored_img, cropped_faces, restored_faces, face_count = (
                     await self._mock_restore(img_array)
                 )
@@ -415,6 +518,8 @@ class FaceRestoreService:
                         has_aligned,
                         paste_back,
                         weight,
+                        progress_callback=progress_callback,
+                        abort_check=abort_check,
                     )
                 )
 
@@ -518,6 +623,8 @@ class FaceRestoreService:
         has_aligned: bool,
         paste_back: bool,
         weight: float,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        abort_check: Optional[Callable[[], None]] = None,
     ) -> Tuple[np.ndarray, List[np.ndarray], List[np.ndarray], int]: # type: ignore
         """Perform real face restoration using GFPGAN or CodeFormer"""
         try:
@@ -526,6 +633,8 @@ class FaceRestoreService:
 
             if "GFPGAN" in self.current_model:  # type: ignore
                 # Use GFPGAN
+                if abort_check is not None:
+                    abort_check()
                 cropped_faces, restored_faces, restored_img = self.restorer.enhance( # type: ignore
                     img_array,
                     has_aligned=has_aligned,
@@ -533,15 +642,24 @@ class FaceRestoreService:
                     paste_back=paste_back,
                     weight=weight, # type: ignore
                 )
+                if progress_callback is not None:
+                    try:
+                        total = len(cropped_faces) if cropped_faces is not None else 1
+                        total = max(1, int(total))
+                        progress_callback(max(0, total - 1), total)
+                    except Exception:
+                        pass
 
             elif "CodeFormer" in self.current_model:  # type:ignore
                 # Use CodeFormer
                 cropped_faces, restored_faces, restored_img = self.restorer.enhance( # type: ignore
                     img_array,
-                    fidelity_weight=weight, # type: ignore
+                    w=weight, # type: ignore
                     has_aligned=has_aligned,
                     only_center_face=only_center_face,
                     paste_back=paste_back,
+                    progress_callback=progress_callback,
+                    abort_check=abort_check,
                 )
 
             else:
@@ -549,7 +667,7 @@ class FaceRestoreService:
 
             face_count = len(cropped_faces) if cropped_faces is not None else 0
 
-             eturn restored_img, cropped_faces or [], restored_faces or [], face_count  # type: ignore
+            return restored_img, cropped_faces or [], restored_faces or [], face_count  # type: ignore
 
         except Exception as e:
             logger.error(f"Real face restoration failed: {e}")

@@ -46,10 +46,13 @@ class AssetManager:
         self.assets_db: Dict[str, Dict[str, Any]] = {}
         self.hash_index: Dict[str, str] = {}  # file_hash -> asset_id mapping
 
+        self.is_ready: bool = False
         self._initialized = True
 
     async def initialize(self) -> bool:
         """Initialize asset management system"""
+        if self.is_ready:
+            return True
         try:
             logger.info("Initializing Asset Manager...")
 
@@ -77,11 +80,19 @@ class AssetManager:
             logger.info(
                 f"✅ Asset Manager initialized: {len(self.assets_db)} assets loaded"
             )
+            self.is_ready = True
             return True
 
         except Exception as e:
             logger.error(f"❌ Asset Manager initialization failed: {str(e)}")
             return False
+
+    async def _ensure_ready(self) -> None:
+        if self.is_ready:
+            return
+        ok = await self.initialize()
+        if not ok:
+            raise RuntimeError("Asset Manager not initialized")
 
     async def save_asset(
         self,
@@ -94,6 +105,8 @@ class AssetManager:
     ) -> Dict[str, Any]:
         """Save asset with metadata and thumbnail generation"""
         try:
+            await self._ensure_ready()
+
             # Generate asset ID and paths
             asset_id = str(uuid.uuid4())
             safe_name = safe_filename(filename)
@@ -170,6 +183,7 @@ class AssetManager:
 
     async def find_by_hash(self, file_hash: str) -> Optional[Dict[str, Any]]:
         """Find asset by file hash (duplicate detection)"""
+        await self._ensure_ready()
         asset_id = self.hash_index.get(file_hash)
         if asset_id:
             return self.assets_db.get(asset_id)
@@ -177,6 +191,7 @@ class AssetManager:
 
     async def get_asset(self, asset_id: str) -> Optional[Dict[str, Any]]:
         """Get asset metadata by ID"""
+        await self._ensure_ready()
         asset = self.assets_db.get(asset_id)
         if asset:
             # Update usage tracking
@@ -193,6 +208,7 @@ class AssetManager:
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """List assets with filtering and pagination"""
+        await self._ensure_ready()
         assets = list(self.assets_db.values())
 
         # Apply filters
@@ -210,6 +226,7 @@ class AssetManager:
 
     async def get_categories_with_counts(self) -> Dict[str, int]:
         """Get asset categories with asset counts"""
+        await self._ensure_ready()
         categories = {}
         for asset in self.assets_db.values():
             category = asset["category"]
@@ -219,6 +236,7 @@ class AssetManager:
     async def delete_asset(self, asset_id: str) -> bool:
         """Delete asset and its files"""
         try:
+            await self._ensure_ready()
             asset = self.assets_db.get(asset_id)
             if not asset:
                 return False

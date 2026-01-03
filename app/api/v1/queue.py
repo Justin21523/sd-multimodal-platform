@@ -4,13 +4,14 @@ Queue Management API endpoints
 Provides task submission, status tracking, and queue management
 """
 import logging
+import asyncio
+import json
 from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, HTTPException, Depends, Query, status, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from services.queue.task_manager import get_task_manager, TaskStatus
 from app.core.queue_manager import (
     QueueManager,
     get_queue_manager,
@@ -19,14 +20,40 @@ from app.core.queue_manager import (
     TaskInfo,
     QueueStats,
 )
-from app.schemas.requests import Txt2ImgRequest, Img2ImgRequest
+from app.schemas.requests import Txt2ImgRequest
+from app.schemas.queue_requests import (
+    QueueFaceRestoreRequest,
+    QueueImg2ImgRequest,
+    QueueInpaintRequest,
+    QueueUpscaleRequest,
+)
 from app.schemas.responses import BaseResponse
-from app.workers.celery_worker import celery_app
 from utils.logging_utils import get_request_logger
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/queue", tags=["Queue Management"])
+
+SUPPORTED_TASK_TYPES = {"txt2img", "img2img", "inpaint", "upscale", "face_restore"}
+
+try:
+    from app.workers.celery_worker import celery_app
+
+    CELERY_AVAILABLE = True
+except Exception:  # pragma: no cover
+    celery_app = None  # type: ignore[assignment]
+    CELERY_AVAILABLE = False
+
+
+async def _queue_manager_dep() -> QueueManager:
+    """Dependency wrapper that degrades gracefully when Redis isn't available."""
+    try:
+        return await get_queue_manager()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Queue system unavailable: {e}",
+        )
 
 # =====================================
 # Request/Response Models
@@ -68,6 +95,7 @@ class TaskStatusResponse(BaseModel):
     created_at: datetime
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
     estimated_duration: Optional[float] = None
     processing_time: Optional[float] = None
 
@@ -112,6 +140,14 @@ class CancelTaskResponse(BaseModel):
     cancelled_at: Optional[datetime] = None
 
 
+class CloneTaskRequest(BaseModel):
+    """Request model for retry/rerun of an existing task."""
+
+    priority: TaskPriority = Field(TaskPriority.NORMAL)
+    user_id: Optional[str] = Field(default=None)
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
 # =====================================
 # Helper Functions
 # =====================================
@@ -127,6 +163,7 @@ def _convert_task_info_to_response(task_info: TaskInfo) -> TaskStatusResponse:
         created_at=task_info.created_at,
         started_at=task_info.started_at,
         completed_at=task_info.completed_at,
+        cancelled_at=getattr(task_info, "cancelled_at", None),
         estimated_duration=task_info.estimated_duration,
         processing_time=task_info.processing_time,
         progress_percent=task_info.progress_percent,
@@ -156,8 +193,25 @@ async def _get_queue_position(
         return None
 
 
+def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = dict(base)
+    for k, v in overrides.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge(merged[k], v)  # type: ignore[arg-type]
+        else:
+            merged[k] = v
+    return merged
+
+
 def _get_worker_status() -> Dict[str, Any]:
     """Get Celery worker status information"""
+    if not CELERY_AVAILABLE or celery_app is None:
+        return {
+            "total_workers": 0,
+            "active_tasks": 0,
+            "reserved_tasks": 0,
+            "error": "Celery is not available (install `celery` and start workers)",
+        }
     try:
         # Get active tasks from Celery
         inspect = celery_app.control.inspect()
@@ -233,7 +287,7 @@ def _get_system_health() -> Dict[str, Any]:
 @router.post("/enqueue", response_model=EnqueueTaskResponse)
 async def enqueue_task(
     request: EnqueueTaskRequest,
-    queue_manager: QueueManager = Depends(get_queue_manager),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
 ) -> EnqueueTaskResponse:
     """
     Enqueue a new task for processing
@@ -241,13 +295,59 @@ async def enqueue_task(
     This endpoint adds a new task to the processing queue with the specified priority.
     Rate limiting is applied per user if user_id is provided.
     """
+    if not CELERY_AVAILABLE or celery_app is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Queue workers unavailable (Celery not installed or not configured).",
+        )
+    if request.task_type not in SUPPORTED_TASK_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported task_type: {request.task_type}. Supported: {sorted(SUPPORTED_TASK_TYPES)}",
+        )
+
     try:
         logger.info(f"Enqueuing {request.task_type} task for user {request.user_id}")
+
+        # Validate/normalize parameters per task_type so history is reproducible.
+        try:
+            if request.task_type == "txt2img":
+                normalized_params = (
+                    Txt2ImgRequest(**request.parameters)
+                    .model_dump(mode="json", exclude_none=True)
+                )
+            elif request.task_type == "img2img":
+                normalized_params = (
+                    QueueImg2ImgRequest(**request.parameters)
+                    .model_dump(mode="json", exclude_none=True)
+                )
+            elif request.task_type == "inpaint":
+                normalized_params = (
+                    QueueInpaintRequest(**request.parameters)
+                    .model_dump(mode="json", exclude_none=True)
+                )
+            elif request.task_type == "upscale":
+                normalized_params = (
+                    QueueUpscaleRequest(**request.parameters)
+                    .model_dump(mode="json", exclude_none=True)
+                )
+            elif request.task_type == "face_restore":
+                normalized_params = (
+                    QueueFaceRestoreRequest(**request.parameters)
+                    .model_dump(mode="json", exclude_none=True)
+                )
+            else:
+                normalized_params = dict(request.parameters)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid parameters for task_type={request.task_type}: {e}",
+            )
 
         # Enqueue task
         task_id = await queue_manager.enqueue_task(
             task_type=request.task_type,
-            input_params=request.parameters,
+            input_params=normalized_params,
             user_id=request.user_id,
             priority=request.priority,
         )
@@ -271,7 +371,8 @@ async def enqueue_task(
         try:
             celery_app.send_task(
                 celery_task_name,
-                args=[task_id, request.parameters],
+                args=[task_id, normalized_params],
+                task_id=task_id,
                 queue=_get_celery_queue_for_task(request.task_type),
             )
         except Exception as e:
@@ -294,6 +395,8 @@ async def enqueue_task(
             queue_position=queue_position,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error enqueuing task: {e}")
         raise HTTPException(
@@ -304,7 +407,7 @@ async def enqueue_task(
 
 @router.get("/status/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(
-    task_id: str, queue_manager: QueueManager = Depends(get_queue_manager)
+    task_id: str, queue_manager: QueueManager = Depends(_queue_manager_dep)
 ) -> TaskStatusResponse:
     """
     Get the current status of a specific task
@@ -332,11 +435,237 @@ async def get_task_status(
         )
 
 
+@router.get("/stream/user/{user_id}")
+async def stream_user_tasks(
+    user_id: str,
+    limit: int = Query(100, ge=1, le=500, description="Max recent tasks to watch"),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
+):
+    """
+    Server-Sent Events stream for all tasks of a user.
+
+    Each event `data` payload matches `/queue/status/{task_id}` (TaskStatusResponse).
+    The stream stays open so newly enqueued tasks also appear without reconnecting.
+    """
+
+    async def event_generator():
+        last_payload_by_id: Dict[str, str] = {}
+        loop = asyncio.get_running_loop()
+
+        async def _get_snapshot_chunks() -> List[str]:
+            tasks = await queue_manager.get_user_tasks(user_id, limit=limit, offset=0)
+
+            active_ids = set()
+            chunks: List[str] = []
+            for task_info in tasks:
+                active_ids.add(task_info.task_id)
+                payload = _convert_task_info_to_response(task_info).model_dump(mode="json")
+                encoded = json.dumps(payload, ensure_ascii=False)
+                if last_payload_by_id.get(task_info.task_id) != encoded:
+                    chunks.append(f"data: {encoded}\n\n")
+                    last_payload_by_id[task_info.task_id] = encoded
+
+            for task_id in list(last_payload_by_id.keys()):
+                if task_id not in active_ids:
+                    last_payload_by_id.pop(task_id, None)
+
+            return chunks
+
+        async def _pubsub_subscribe(pubsub: Any, channel: str) -> None:
+            subscribe = getattr(pubsub, "subscribe", None)
+            if subscribe is None:
+                raise RuntimeError("PubSub missing subscribe()")
+            result = subscribe(channel)
+            if asyncio.iscoroutine(result):
+                await result
+
+        async def _pubsub_get_message(pubsub: Any, timeout_seconds: float) -> Optional[Dict[str, Any]]:
+            get_message = getattr(pubsub, "get_message", None)
+            if get_message is None:
+                return None
+            try:
+                result = get_message(ignore_subscribe_messages=True, timeout=timeout_seconds)
+            except TypeError:
+                result = get_message(ignore_subscribe_messages=True)
+            if asyncio.iscoroutine(result):
+                try:
+                    return await asyncio.wait_for(result, timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    return None
+            return result
+
+        pubsub: Optional[Any] = None
+        channel: Optional[str] = None
+
+        try:
+            task_store = getattr(queue_manager, "task_store", None)
+            redis_client = getattr(task_store, "redis_client", None) if task_store else None
+            if redis_client is not None and hasattr(redis_client, "pubsub"):
+                pubsub = redis_client.pubsub()
+                prefix = getattr(task_store, "user_tasks_prefix", "user:")
+                suffix = getattr(task_store, "user_events_suffix", ":events")
+                channel = f"{prefix}{user_id}{suffix}"
+                await _pubsub_subscribe(pubsub, channel)
+        except Exception:
+            pubsub = None
+            channel = None
+
+        try:
+            for chunk in await _get_snapshot_chunks():
+                yield chunk
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'error': 'queue_unavailable', 'details': str(e)})}\n\n"
+            return
+
+        resync_interval_seconds = 15.0
+        keep_alive_interval_seconds = 10.0
+        last_resync_at = loop.time()
+        last_keep_alive_at = last_resync_at
+
+        try:
+            while True:
+                if pubsub is None:
+                    try:
+                        for chunk in await _get_snapshot_chunks():
+                            yield chunk
+                    except Exception as e:
+                        yield f"event: error\ndata: {json.dumps({'error': 'queue_unavailable', 'details': str(e)})}\n\n"
+                        return
+
+                    yield ": keep-alive\n\n"
+                    await asyncio.sleep(1.0)
+                    continue
+
+                message: Optional[Dict[str, Any]] = None
+                try:
+                    message = await _pubsub_get_message(pubsub, timeout_seconds=1.0)
+                except Exception:
+                    try:
+                        close = getattr(pubsub, "close", None)
+                        if close is not None:
+                            result = close()
+                            if asyncio.iscoroutine(result):
+                                await result
+                    except Exception:
+                        pass
+                    pubsub = None
+                    channel = None
+                    continue
+
+                if message and message.get("type") == "message":
+                    data = message.get("data")
+                    if isinstance(data, str):
+                        try:
+                            parsed = json.loads(data)
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            task_id = parsed.get("task_id")
+                            if isinstance(task_id, str) and task_id:
+                                task_info = await queue_manager.get_task_status(task_id)
+                                if task_info is None:
+                                    last_payload_by_id.pop(task_id, None)
+                                else:
+                                    payload = _convert_task_info_to_response(task_info).model_dump(
+                                        mode="json"
+                                    )
+                                    encoded = json.dumps(payload, ensure_ascii=False)
+                                    if last_payload_by_id.get(task_id) != encoded:
+                                        yield f"data: {encoded}\n\n"
+                                        last_payload_by_id[task_id] = encoded
+
+                now = loop.time()
+                if now - last_resync_at >= resync_interval_seconds:
+                    try:
+                        for chunk in await _get_snapshot_chunks():
+                            yield chunk
+                        last_resync_at = now
+                    except Exception as e:
+                        yield f"event: error\ndata: {json.dumps({'error': 'queue_unavailable', 'details': str(e)})}\n\n"
+                        return
+
+                if now - last_keep_alive_at >= keep_alive_interval_seconds:
+                    yield ": keep-alive\n\n"
+                    last_keep_alive_at = now
+
+        except asyncio.CancelledError:
+            return
+        finally:
+            if pubsub is not None:
+                try:
+                    if channel and hasattr(pubsub, "unsubscribe"):
+                        result = pubsub.unsubscribe(channel)
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception:
+                    pass
+                try:
+                    close = getattr(pubsub, "close", None)
+                    if close is not None:
+                        result = close()
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@router.get("/stream/{task_id}")
+async def stream_task_status(
+    task_id: str, queue_manager: QueueManager = Depends(_queue_manager_dep)
+):
+    """
+    Server-Sent Events stream for a single task status.
+
+    The event `data` payload matches `/queue/status/{task_id}` (TaskStatusResponse).
+    """
+
+    async def event_generator():
+        last_payload: Optional[str] = None
+        while True:
+            task_info = await queue_manager.get_task_status(task_id)
+            if not task_info:
+                yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
+                return
+
+            payload = _convert_task_info_to_response(task_info).model_dump(mode="json")
+            encoded = json.dumps(payload, ensure_ascii=False)
+            if encoded != last_payload:
+                yield f"data: {encoded}\n\n"
+                last_payload = encoded
+
+            if task_info.status in (
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.TIMEOUT,
+            ):
+                return
+
+            # Keep the connection alive and reduce client polling.
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 @router.post("/cancel/{task_id}", response_model=CancelTaskResponse)
 async def cancel_task(
     task_id: str,
     user_id: Optional[str] = Query(None, description="User ID for authorization"),
-    queue_manager: QueueManager = Depends(get_queue_manager),
+    force: bool = Query(
+        False,
+        description="Force-terminate the Celery task process (use only if cooperative cancel is insufficient).",
+    ),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
 ) -> CancelTaskResponse:
     """
     Cancel a specific task if it's cancellable
@@ -351,7 +680,8 @@ async def cancel_task(
         if success:
             # Also try to revoke the Celery task if it exists
             try:
-                celery_app.control.revoke(task_id, terminate=True)
+                if celery_app is not None:
+                    celery_app.control.revoke(task_id, terminate=bool(force))
             except Exception as e:
                 logger.warning(f"Could not revoke Celery task {task_id}: {e}")
 
@@ -372,6 +702,7 @@ async def cancel_task(
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
+                TaskStatus.TIMEOUT,
             ]:
                 message = f"Task cannot be cancelled (status: {task_info.status})"
             else:
@@ -387,9 +718,135 @@ async def cancel_task(
         )
 
 
+async def _clone_existing_task(
+    *,
+    source_task_id: str,
+    request: CloneTaskRequest,
+    queue_manager: QueueManager,
+    require_failed: bool,
+) -> Dict[str, Any]:
+    if not CELERY_AVAILABLE or celery_app is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Queue workers unavailable (Celery not installed or not configured).",
+        )
+
+    task_info = await queue_manager.get_task_status(source_task_id)
+    if not task_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task {source_task_id} not found",
+        )
+
+    if require_failed and task_info.status not in (
+        TaskStatus.FAILED,
+        TaskStatus.TIMEOUT,
+        TaskStatus.CANCELLED,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Task {source_task_id} is not retryable (status: {task_info.status})",
+        )
+
+    base_params = task_info.input_params or {}
+    merged_params = _deep_merge(base_params, request.overrides or {})
+
+    try:
+        if task_info.task_type == "txt2img":
+            normalized_params = Txt2ImgRequest(**merged_params).model_dump(
+                mode="json", exclude_none=True
+            )
+        elif task_info.task_type == "img2img":
+            normalized_params = QueueImg2ImgRequest(**merged_params).model_dump(
+                mode="json", exclude_none=True
+            )
+        elif task_info.task_type == "inpaint":
+            normalized_params = QueueInpaintRequest(**merged_params).model_dump(
+                mode="json", exclude_none=True
+            )
+        elif task_info.task_type == "upscale":
+            normalized_params = QueueUpscaleRequest(**merged_params).model_dump(
+                mode="json", exclude_none=True
+            )
+        elif task_info.task_type == "face_restore":
+            normalized_params = QueueFaceRestoreRequest(**merged_params).model_dump(
+                mode="json", exclude_none=True
+            )
+        else:
+            normalized_params = dict(merged_params)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid parameters for task_type={task_info.task_type}: {e}",
+        )
+
+    new_task_id = await queue_manager.enqueue_task(
+        task_type=task_info.task_type,
+        input_params=normalized_params,
+        user_id=request.user_id or task_info.user_id,
+        priority=request.priority,
+    )
+    if not new_task_id:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to enqueue cloned task",
+        )
+
+    try:
+        celery_app.send_task(
+            f"process_{task_info.task_type}",
+            args=[new_task_id, normalized_params],
+            task_id=new_task_id,
+            queue=_get_celery_queue_for_task(task_info.task_type),
+        )
+    except Exception as e:
+        await queue_manager.task_store.update_task_status(  # type: ignore
+            new_task_id,
+            TaskStatus.FAILED,
+            error_info={"error": "Failed to submit to worker", "details": str(e)},
+            current_step="failed",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to submit task to worker: {e}",
+        )
+
+    return {"task_id": new_task_id, "task_type": task_info.task_type}
+
+
+@router.post("/rerun/{task_id}")
+async def rerun_task(
+    task_id: str,
+    request: CloneTaskRequest,
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
+) -> Dict[str, Any]:
+    data = await _clone_existing_task(
+        source_task_id=task_id,
+        request=request,
+        queue_manager=queue_manager,
+        require_failed=False,
+    )
+    return {"success": True, "message": "Rerun enqueued", "data": data}
+
+
+@router.post("/retry/{task_id}")
+async def retry_task(
+    task_id: str,
+    request: CloneTaskRequest,
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
+) -> Dict[str, Any]:
+    data = await _clone_existing_task(
+        source_task_id=task_id,
+        request=request,
+        queue_manager=queue_manager,
+        require_failed=True,
+    )
+    return {"success": True, "message": "Retry enqueued", "data": data}
+
+
 @router.get("/status", response_model=QueueStatusResponse)
 async def get_queue_status(
-    queue_manager: QueueManager = Depends(get_queue_manager),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
 ) -> QueueStatusResponse:
     """
     Get overall queue system status and statistics
@@ -426,7 +883,7 @@ async def list_tasks(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    queue_manager: QueueManager = Depends(get_queue_manager),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
 ) -> TaskListResponse:
     """
     List tasks with optional filtering and pagination
@@ -500,7 +957,7 @@ async def list_user_tasks(
     status: Optional[TaskStatus] = Query(None, description="Filter by task status"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    queue_manager: QueueManager = Depends(get_queue_manager),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
 ) -> TaskListResponse:
     """
     List all tasks for a specific user
@@ -521,7 +978,7 @@ async def cleanup_completed_tasks(
     older_than_hours: int = Query(
         24, ge=1, description="Clean up tasks completed more than N hours ago"
     ),
-    queue_manager: QueueManager = Depends(get_queue_manager),
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
 ) -> Dict[str, Any]:
     """
     Clean up completed tasks older than specified time
@@ -662,265 +1119,10 @@ async def websocket_task_status(websocket: WebSocket, task_id: str):
 """
 
 
-# Request schemas for queue operations
-class PostprocessRequest(BaseModel):
-    """Post-processing task request"""
-
-    image_paths: List[str] = Field(..., description="Paths to images for processing")
-    pipeline_type: str = Field(
-        default="standard", description="Pipeline type: standard/fast/quality"
-    )
-    steps: Optional[List[Dict[str, Any]]] = Field(
-        default=None, description="Custom pipeline steps"
-    )
-
-
-class BatchGenerationRequest(BaseModel):
-    """Batch generation request"""
-
-    task_type: str = Field(..., description="Type of generation: txt2img/img2img")
-    batch_params: List[Dict[str, Any]] = Field(
-        ..., description="List of generation parameters"
-    )
-    postprocess_chain: Optional[List[str]] = Field(
-        default=None, description="Post-processing steps"
-    )
-
-    class Config:
-        schema_extra = {
-            "example": {
-                "task_type": "txt2img",
-                "batch_params": [
-                    {"prompt": "cat", "seed": 123},
-                    {"prompt": "dog", "seed": 456},
-                    {"prompt": "bird", "seed": 789},
-                ],
-                "postprocess_chain": ["upscale", "face_restore"],
-            }
-        }
-
-
-# Response schemas
-class TaskSubmissionResponse(BaseResponse):
-    """Task submission response"""
-
-    data: Dict[str, str] = Field(..., description="Task submission data")
-
-
-class QueueStatsResponse(BaseResponse):
-    """Queue statistics response"""
-
-    data: Dict[str, Any] = Field(..., description="Queue statistics")
-
-
-@router.post("/submit/txt2img", response_model=TaskSubmissionResponse)
-async def submit_txt2img_task(
-    request: Txt2ImgRequest,
-    postprocess_chain: Optional[List[str]] = Query(default=None),
-    req_logger=get_request_logger("queue_submit"),
-):
-    """Submit text-to-image generation task to queue"""
-
-    try:
-        task_manager = get_task_manager()
-
-        # Convert request to generation parameters
-        generation_params = {
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt or "",
-            "model_id": request.model_id,
-            "width": request.width,
-            "height": request.height,
-            "steps": request.num_inference_steps,
-            "cfg_scale": request.guidance_scale,
-            "seed": request.seed,
-        }
-
-        # Submit task
-        task_id = await task_manager.submit_generation_task(
-            task_type="txt2img",
-            generation_params=generation_params,
-            postprocess_chain=postprocess_chain,
-        )
-
-        req_logger.info(f"Submitted txt2img task: {task_id}")
-
-        return TaskSubmissionResponse(
-            success=True,
-            message="Task submitted to queue",
-            data={
-                "task_id": task_id,
-                "task_type": "txt2img",
-                "postprocess_enabled": bool(postprocess_chain),  # type: ignore
-            },
-        )
-
-    except Exception as e:
-        req_logger.error(f"Failed to submit txt2img task: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/submit/img2img", response_model=TaskSubmissionResponse)
-async def submit_img2img_task(
-    request: Img2ImgRequest,
-    postprocess_chain: Optional[List[str]] = Query(default=None),
-    req_logger=get_request_logger("queue_submit"),
-):
-    """Submit image-to-image generation task to queue"""
-
-    try:
-        task_manager = get_task_manager()
-
-        # Convert request to generation parameters
-        generation_params = {
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt or "",
-            "init_image": request.init_image,
-            "model_id": request.model_id,
-            "width": request.width,
-            "height": request.height,
-            "steps": request.num_inference_steps,
-            "cfg_scale": request.guidance_scale,
-            "strength": request.strength,
-            "seed": request.seed,
-        }
-
-        # Submit task
-        task_id = await task_manager.submit_generation_task(
-            task_type="img2img",
-            generation_params=generation_params,
-            postprocess_chain=postprocess_chain,
-        )
-
-        req_logger.info(f"Submitted img2img task: {task_id}")
-
-        return TaskSubmissionResponse(
-            success=True,
-            message="Task submitted to queue",
-            data={
-                "task_id": task_id,
-                "task_type": "img2img",
-                "postprocess_enabled": bool(postprocess_chain),  # type: ignore
-            },
-        )
-
-    except Exception as e:
-        req_logger.error(f"Failed to submit img2img task: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/submit/postprocess", response_model=TaskSubmissionResponse)
-async def submit_postprocess_task(
-    request: PostprocessRequest, req_logger=get_request_logger("queue_submit")
-):
-    """Submit post-processing task to queue"""
-
-    try:
-        task_manager = get_task_manager()
-
-        # Prepare post-processing parameters
-        postprocess_params = {
-            "image_paths": request.image_paths,
-            "pipeline_type": request.pipeline_type,
-            "steps": request.steps,
-        }
-
-        # Submit task
-        task_id = await task_manager.submit_generation_task(
-            task_type="postprocess", generation_params=postprocess_params
-        )
-
-        req_logger.info(f"Submitted postprocess task: {task_id}")
-
-        return TaskSubmissionResponse(
-            success=True,
-            message="Post-processing task submitted to queue",
-            data={
-                "task_id": task_id,
-                "task_type": "postprocess",
-                "images_count": len(request.image_paths),  # type: ignore
-                "pipeline_type": request.pipeline_type,
-            },
-        )
-
-    except Exception as e:
-        req_logger.error(f"Failed to submit postprocess task: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/submit/batch", response_model=TaskSubmissionResponse)
-async def submit_batch_task(
-    request: BatchGenerationRequest, req_logger=get_request_logger("queue_submit")
-):
-    """Submit batch generation task to queue"""
-
-    try:
-        task_manager = get_task_manager()
-
-        # Validate batch size
-        if len(request.batch_params) > 10:  # Configurable limit
-            raise HTTPException(
-                status_code=400, detail="Batch size exceeds maximum limit of 10"
-            )
-
-        # Submit batch task
-        batch_id = await task_manager.submit_batch_task(
-            task_type=request.task_type,
-            batch_params=request.batch_params,
-            postprocess_chain=request.postprocess_chain,
-        )
-
-        req_logger.info(f"Submitted batch task: {batch_id}")
-
-        return TaskSubmissionResponse(
-            success=True,
-            message="Batch task submitted to queue",
-            data={
-                "batch_id": batch_id,
-                "task_type": "batch",
-                "batch_size": len(request.batch_params),  # type: ignore
-                "postprocess_enabled": bool(request.postprocess_chain),
-            },
-        )
-
-    except Exception as e:
-        req_logger.error(f"Failed to submit batch task: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/stats", response_model=QueueStatsResponse)
-async def get_queue_stats(req_logger=get_request_logger("queue_stats")):
-    """Get comprehensive queue statistics"""
-
-    try:
-        task_manager = get_task_manager()
-        stats = await task_manager.get_queue_stats()
-
-        return QueueStatsResponse(
-            success=True, message="Queue statistics retrieved", data=stats
-        )
-
-    except Exception as e:
-        req_logger.error(f"Failed to get queue stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/cleanup")
-async def cleanup_old_tasks(
-    background_tasks: BackgroundTasks, req_logger=get_request_logger("queue_cleanup")
-):
-    """Clean up old completed tasks"""
-
-    try:
-        task_manager = get_task_manager()
-
-        # Run cleanup in background
-        background_tasks.add_task(task_manager.cleanup_old_tasks)
-
-        req_logger.info("Started background task cleanup")
-
-        return BaseResponse(success=True, message="Task cleanup started in background")
-
-    except Exception as e:
-        req_logger.error(f"Failed to start task cleanup: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+#
+# Legacy endpoints (`/submit/*`, `/stats`, `/cleanup`) were removed in Phase 0 to
+# avoid maintaining two queue systems in parallel. Use:
+# - POST   /api/v1/queue/enqueue
+# - GET    /api/v1/queue/status/{task_id}
+# - GET    /api/v1/queue/status
+# - GET    /api/v1/queue/tasks

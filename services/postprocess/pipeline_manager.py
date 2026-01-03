@@ -14,10 +14,33 @@ from PIL import Image
 import numpy as np
 import cv2
 import logging
-from codeformer import CodeFormer
-from realesrgan import RealESRGANer
-from basicsr.archs.rrdbnet_arch import RRDBNet
-from gfpgan import GFPGANer
+
+# Optional postprocess dependencies (keep this module importable without them).
+try:
+    from realesrgan import RealESRGANer  # type: ignore
+    from basicsr.archs.rrdbnet_arch import RRDBNet  # type: ignore
+
+    REALESRGAN_AVAILABLE = True
+except Exception:  # pragma: no cover
+    RealESRGANer = None  # type: ignore
+    RRDBNet = None  # type: ignore
+    REALESRGAN_AVAILABLE = False
+
+try:
+    from gfpgan import GFPGANer  # type: ignore
+
+    GFPGAN_AVAILABLE = True
+except Exception:  # pragma: no cover
+    GFPGANer = None  # type: ignore
+    GFPGAN_AVAILABLE = False
+
+try:
+    from codeformer import CodeFormer  # type: ignore
+
+    CODEFORMER_AVAILABLE = True
+except Exception:  # pragma: no cover
+    CodeFormer = None  # type: ignore
+    CODEFORMER_AVAILABLE = False
 
 from app.config import settings
 from utils.logging_utils import get_generation_logger
@@ -148,6 +171,10 @@ class PostprocessPipeline:
     async def _load_realesrgan(self, model_name: str):
         """Load Real-ESRGAN upscaling model"""
         try:
+            if not REALESRGAN_AVAILABLE or RealESRGANer is None or RRDBNet is None:
+                raise ImportError(
+                    "Real-ESRGAN not installed (missing `realesrgan`/`basicsr` and dependencies)."
+                )
             # Model configuration mapping
             model_configs = {
                 "real-esrgan-x4": {
@@ -170,12 +197,25 @@ class PostprocessPipeline:
             if not config:
                 raise ValueError(f"Unknown Real-ESRGAN model: {model_name}")
 
-            if not config["model_path"].exists():
-                raise FileNotFoundError(f"Model file not found: {config['model_path']}")
+            model_path = config["model_path"]
+            if not model_path.exists():
+                legacy_path = (
+                    Path(settings.MODELS_PATH)
+                    / "upscale"
+                    / "real-esrgan"
+                    / "experiments"
+                    / "pretrained_models"
+                    / model_path.name
+                )
+                if legacy_path.exists():
+                    model_path = legacy_path
+
+            if not model_path.exists():
+                raise FileNotFoundError(f"Model file not found: {model_path}")
 
             upsampler = RealESRGANer(
                 scale=config["scale"],
-                model_path=str(config["model_path"]),
+                model_path=str(model_path),
                 model=config["arch"],
                 device=settings.DEVICE,
                 half=settings.TORCH_DTYPE == "float16",
@@ -184,12 +224,25 @@ class PostprocessPipeline:
             return upsampler
 
         except ImportError:
-            raise ImportError("Real-ESRGAN not installed. Run: pip install realesrgan")
+            raise ImportError("Real-ESRGAN not installed. Run: pip install realesrgan basicsr")
 
     async def _load_gfpgan(self, model_name: str):
         """Load GFPGAN face restoration model"""
         try:
+            if not GFPGAN_AVAILABLE or GFPGANer is None:
+                raise ImportError("GFPGAN not installed (missing `gfpgan` and dependencies).")
             model_path = Path(settings.MODELS_PATH) / "face-restore" / "GFPGANv1.4.pth"
+            if not model_path.exists():
+                legacy_path = (
+                    Path(settings.MODELS_PATH)
+                    / "face-restore"
+                    / "gfpgan"
+                    / "experiments"
+                    / "pretrained_models"
+                    / "GFPGANv1.4.pth"
+                )
+                if legacy_path.exists():
+                    model_path = legacy_path
 
             if not model_path.exists():
                 raise FileNotFoundError(f"GFPGAN model not found: {model_path}")
@@ -210,7 +263,20 @@ class PostprocessPipeline:
     async def _load_codeformer(self, model_name: str):
         """Load CodeFormer face restoration model"""
         try:
+            if not CODEFORMER_AVAILABLE or CodeFormer is None:
+                raise ImportError("CodeFormer not installed (missing `codeformer` and dependencies).")
             model_path = Path(settings.MODELS_PATH) / "face-restore" / "codeformer.pth"
+            if not model_path.exists():
+                legacy_path = (
+                    Path(settings.MODELS_PATH)
+                    / "postprocess"
+                    / "codeformer"
+                    / "weights"
+                    / "CodeFormer"
+                    / "codeformer.pth"
+                )
+                if legacy_path.exists():
+                    model_path = legacy_path
 
             if not model_path.exists():
                 raise FileNotFoundError(f"CodeFormer model not found: {model_path}")

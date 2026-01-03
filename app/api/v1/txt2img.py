@@ -29,9 +29,10 @@ from app.schemas.responses import (
 )
 from services.generation.txt2img_service import Txt2ImgService
 from services.models.sd_models import get_model_manager, ModelRegistry
+from services.history import get_history_store
 
 from utils.logging_utils import get_request_logger
-from utils.file_utils import ensure_directory, safe_filename
+from utils.file_utils import ensure_directory, get_output_url, safe_filename
 from utils.metadata_utils import save_metadata_json
 from utils.image_utils import image_to_base64, optimize_image
 
@@ -110,9 +111,43 @@ async def generate_image(
         req_logger.info(f"Generation params: {generation_params}")
 
         # Generate images
+        generation_start = time.time()
         generation_result = await model_manager.generate_image(**generation_params)
-        images = generation_result["images"]
-        metadata = generation_result["metadata"]
+        generation_time = time.time() - generation_start
+
+        images = generation_result.get("images") or []
+
+        model_info = ModelRegistry.get_model_info(target_model) or {}
+        model_name = model_info.get("name") or target_model
+
+        try:
+            import torch
+
+            vram_used_gb = (
+                torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+            )
+        except Exception:
+            vram_used_gb = 0.0
+
+        metadata = {
+            "model_id": target_model,
+            "model_name": model_name,
+            "prompt": request_data.prompt,
+            "negative_prompt": request_data.negative_prompt,
+            "width": request_data.width,
+            "height": request_data.height,
+            "num_inference_steps": request_data.num_inference_steps,
+            "guidance_scale": request_data.guidance_scale,
+            "seed": request_data.seed,
+            "num_images": request_data.num_images,
+            "generation_time": round(generation_time, 2),
+            "vram_used_gb": round(float(vram_used_gb), 3),
+            "optimization_info": {
+                "attention_slicing": bool(settings.USE_ATTENTION_SLICING),
+                "cpu_offload": bool(settings.ENABLE_CPU_OFFLOAD),
+                "sdpa": bool(settings.USE_SDPA),
+            },
+        }
 
         # Process results
         image_data = []
@@ -135,8 +170,9 @@ async def generate_image(
                 # Generate safe filename
                 prompt_part = safe_filename(request_data.prompt[:50])
                 timestamp = int(time.time())
+                seed_label = request_data.seed if request_data.seed is not None else "random"
                 filename = (
-                    f"{timestamp}_{prompt_part}_seed{metadata['seed']}_{i:02d}.png"
+                    f"{timestamp}_{prompt_part}_seed{seed_label}_{i:02d}.png"
                 )
                 image_path = output_dir / filename
 
@@ -144,7 +180,9 @@ async def generate_image(
                 optimized_image = optimize_image(image, quality=95)
                 optimized_image.save(image_path, "PNG", optimize=True)
 
-                image_info["file_path"] = str(image_path.relative_to(Path.cwd()))
+                relative_path = image_path.relative_to(Path(settings.OUTPUT_PATH))
+                image_info["path"] = str(relative_path)
+                image_info["url"] = get_output_url(image_path)
                 image_info["file_size_bytes"] = image_path.stat().st_size
                 saved_paths.append(image_path)
 
@@ -165,8 +203,10 @@ async def generate_image(
                 **metadata,
                 "task_id": task_id,
                 "request_id": request_id,
-                "request_params": request_data.dict(),
-                "saved_files": [str(p.relative_to(Path.cwd())) for p in saved_paths],
+                "request_params": request_data.model_dump(),
+                "saved_files": [
+                    str(p.relative_to(Path(settings.OUTPUT_PATH))) for p in saved_paths
+                ],
                 "total_time": time.time() - start_time,
             }
             save_metadata_json(complete_metadata, metadata_path)
@@ -199,6 +239,59 @@ async def generate_image(
             },
             "optimization_info": metadata["optimization_info"],
         }
+
+        try:
+            store = get_history_store()
+            input_params = request_data.model_dump(mode="json", exclude_none=True)
+            history_images = []
+            if request_data.save_images and saved_paths:
+                for i, p in enumerate(saved_paths):
+                    try:
+                        history_images.append(
+                            {
+                                "image_path": str(p),
+                                "image_url": get_output_url(p),
+                                "width": images[i].width if i < len(images) else None,
+                                "height": images[i].height if i < len(images) else None,
+                            }
+                        )
+                    except Exception:
+                        continue
+
+            history_result = {
+                "success": True,
+                "task_id": task_id,
+                "task_type": "txt2img",
+                "prompt": request_data.prompt,
+                "negative_prompt": request_data.negative_prompt,
+                "parameters": {
+                    "model_id": target_model,
+                    "width": request_data.width,
+                    "height": request_data.height,
+                    "steps": request_data.num_inference_steps,
+                    "cfg_scale": request_data.guidance_scale,
+                    "seed": request_data.seed,
+                    "num_images": request_data.num_images,
+                },
+                "result": {
+                    "images": history_images,
+                    "image_count": len(history_images),
+                    "model_used": target_model,
+                    "generation_time": round(generation_time, 2),
+                    "total_time": round(total_time, 2),
+                },
+            }
+
+            store.record_completion(
+                history_id=task_id,
+                task_type="txt2img",
+                run_mode="sync",
+                user_id=request_data.user_id if isinstance(request_data.user_id, str) and request_data.user_id else None,
+                input_params=input_params,
+                result_data=history_result,
+            )
+        except Exception as e:
+            req_logger.warning(f"Failed to write history record: {e}")
 
         req_logger.info(
             f"✅ Generation completed successfully",
@@ -292,7 +385,7 @@ async def list_available_models() -> Dict[str, Any]:
 
         # Check if model files exist
         model_path = (
-            Path(settings.OUTPUT_PATH).parent / "models" / model_info["local_path"]  # type: ignore
+            Path(settings.MODELS_PATH) / model_info["local_path"]  # type: ignore
         )
         is_installed = model_path.exists()
         is_loaded = model_manager.current_model_id == model_id
@@ -352,7 +445,7 @@ async def switch_model(
         )
 
 
-@router.get("/txt2img/templates")
+@router.get("/templates")
 async def get_prompt_templates() -> Dict[str, Any]:
     """Retrieve available prompt templates for text-to-image generation"""
 
@@ -364,7 +457,7 @@ async def get_prompt_templates() -> Dict[str, Any]:
     }
 
 
-@router.post("/txt2img/preview")
+@router.post("/preview")
 async def preview_prompt_with_template(
     prompt: str, template_name: str = "photorealistic"
 ) -> Dict[str, Any]:
@@ -387,18 +480,18 @@ async def preview_prompt_with_template(
 
     return {
         "success": True,
-        "data": {
-            "original_prompt": prompt,
-            "template_used": template_name,
-            "processed_positive": processed_positive,
-            "processed_negative": processed_negative,
-            "template_info": template.dict(),
-        },
+            "data": {
+                "original_prompt": prompt,
+                "template_used": template_name,
+                "processed_positive": processed_positive,
+                "processed_negative": processed_negative,
+                "template_info": template.model_dump(),
+            },
         "message": "Prompt preview generated successfully",
     }
 
 
-@router.get("/txt2img/test-types")
+@router.get("/test-types")
 async def test_type_handling() -> Dict[str, Any]:
     """Test endpoint to verify type handling and safety features"""
 

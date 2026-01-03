@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
 
-    # Shared Cache Settings
-    AI_CACHE_ROOT: str = "/mnt/c/web-projects/AI_LLM_projects/ai_warehouse"
+    # Shared Cache Settings (must follow ~/Desktop/data_model_structure.md)
+    AI_CACHE_ROOT: str = "/mnt/c/ai_cache"
 
     # Model Settings
     SD_MODEL: str = "runwayml/stable-diffusion-v1-5"

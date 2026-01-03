@@ -1,6 +1,7 @@
 # app/core/queue_manager.py
 import asyncio
 import logging
+import json
 import time
 from datetime import datetime, timedelta
 from enum import Enum
@@ -10,8 +11,15 @@ from pathlib import Path
 import json
 import uuid
 
-import redis.asyncio as redis
-from celery import Celery
+from typing import Any
+
+try:
+    import redis.asyncio as redis_async
+
+    REDIS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    redis_async = None  # type: ignore[assignment]
+    REDIS_AVAILABLE = False
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -58,6 +66,7 @@ class TaskInfo:
     created_at: datetime = None  # type: ignore
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
     estimated_duration: Optional[float] = None  # seconds
 
     # Progress tracking
@@ -119,15 +128,41 @@ class RedisTaskStore:
 
     def __init__(self, redis_url: str):
         self.redis_url = redis_url
-        self.redis_client: Optional[redis.Redis] = None
+        self.redis_client: Optional[Any] = None
         self.task_prefix = "task:"
         self.queue_prefix = "queue:"
+        self.user_tasks_prefix = "user:"
+        self.user_events_suffix = ":events"
         self.stats_key = "queue:stats"
+
+    async def _publish_user_task_event(self, task_info: TaskInfo) -> None:
+        """
+        Best-effort publish of a task update for SSE subscribers.
+
+        Channel: user:{user_id}:events
+        Payload: {"task_id": "..."}
+        """
+        if not task_info.user_id:
+            return
+        client = self.redis_client
+        if client is None or not hasattr(client, "publish"):
+            return
+        try:
+            channel = f"{self.user_tasks_prefix}{task_info.user_id}{self.user_events_suffix}"
+            payload = json.dumps({"task_id": task_info.task_id}, ensure_ascii=False)
+            await client.publish(channel, payload)  # type: ignore[attr-defined]
+        except Exception:
+            return
 
     async def connect(self):
         """Initialize Redis connection with connection pooling"""
+        if not REDIS_AVAILABLE:
+            raise ImportError(
+                "Redis client not installed. Install `redis` to enable queue features."
+            )
+
         try:
-            self.redis_client = redis.from_url(
+            self.redis_client = redis_async.from_url(  # type: ignore[union-attr]
                 self.redis_url,
                 encoding="utf-8",
                 decode_responses=True,
@@ -167,7 +202,18 @@ class RedisTaskStore:
             queue_key = f"{self.queue_prefix}{task_info.status}"
             pipe.zadd(queue_key, {task_info.task_id: priority_score})
 
+            # Maintain a lightweight user->task index for efficient streaming/listing.
+            if task_info.user_id:
+                user_key = f"{self.user_tasks_prefix}{task_info.user_id}:tasks"
+                try:
+                    created_score = float(task_info.created_at.timestamp())
+                except Exception:
+                    created_score = time.time()
+                pipe.zadd(user_key, {task_info.task_id: created_score})
+                pipe.expire(user_key, 86400 * 7)
+
             await pipe.execute()
+            await self._publish_user_task_event(task_info)
             logger.debug(f"Task {task_info.task_id} stored successfully")
             return True
 
@@ -186,6 +232,18 @@ class RedisTaskStore:
 
             task_dict = json.loads(task_data)
 
+            # Normalize enum fields (stored as strings)
+            if task_dict.get("status"):
+                try:
+                    task_dict["status"] = TaskStatus(task_dict["status"])
+                except Exception:
+                    pass
+            if task_dict.get("priority"):
+                try:
+                    task_dict["priority"] = TaskPriority(task_dict["priority"])
+                except Exception:
+                    pass
+
             # Convert string dates back to datetime objects
             if task_dict.get("created_at"):
                 task_dict["created_at"] = datetime.fromisoformat(
@@ -198,6 +256,10 @@ class RedisTaskStore:
             if task_dict.get("completed_at"):
                 task_dict["completed_at"] = datetime.fromisoformat(
                     task_dict["completed_at"]
+                )
+            if task_dict.get("cancelled_at"):
+                task_dict["cancelled_at"] = datetime.fromisoformat(
+                    task_dict["cancelled_at"]
                 )
 
             return TaskInfo(**task_dict)
@@ -218,6 +280,18 @@ class RedisTaskStore:
 
             # Update fields
             old_status = task_info.status
+            terminal_statuses = {
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.TIMEOUT,
+            }
+            if old_status in terminal_statuses and status != old_status:
+                logger.debug(
+                    "Ignoring status update for terminal task",
+                    extra={"task_id": task_id, "old_status": old_status, "new_status": status},
+                )
+                return False
             task_info.status = status
 
             # Set timing information based on status
@@ -227,8 +301,11 @@ class RedisTaskStore:
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
+                TaskStatus.TIMEOUT,
             ]:
                 task_info.completed_at = datetime.now()
+                if status == TaskStatus.CANCELLED and not task_info.cancelled_at:
+                    task_info.cancelled_at = task_info.completed_at
                 if task_info.started_at:
                     task_info.processing_time = (
                         task_info.completed_at - task_info.started_at
@@ -283,17 +360,36 @@ class RedisTaskStore:
     ) -> List[TaskInfo]:
         """Get all tasks for a specific user"""
         try:
-            # This is a simplified implementation
-            # In production, you might want to maintain a separate user-task index
-            all_tasks = []
+            user_key = f"{self.user_tasks_prefix}{user_id}:tasks"
+            task_ids = await self.redis_client.zrevrange(  # type: ignore
+                user_key, offset, offset + limit - 1
+            )
+            tasks: List[TaskInfo] = []
+            missing: List[str] = []
+            for task_id in task_ids:
+                task_info = await self.get_task(task_id)
+                if task_info:
+                    tasks.append(task_info)
+                else:
+                    missing.append(task_id)
 
-            # Check all status queues
+            if missing:
+                try:
+                    pipe = self.redis_client.pipeline()  # type: ignore
+                    pipe.zrem(user_key, *missing)
+                    await pipe.execute()
+                except Exception:
+                    pass
+
+            if tasks:
+                tasks.sort(key=lambda x: x.created_at, reverse=True)
+                return tasks
+
+            # Fallback for legacy data (no user index yet).
+            all_tasks: List[TaskInfo] = []
             for status in TaskStatus:
                 queue_tasks = await self.get_queue_tasks(status, limit=1000)
-                user_tasks = [t for t in queue_tasks if t.user_id == user_id]
-                all_tasks.extend(user_tasks)
-
-            # Sort by creation time and apply pagination
+                all_tasks.extend([t for t in queue_tasks if t.user_id == user_id])
             all_tasks.sort(key=lambda x: x.created_at, reverse=True)
             return all_tasks[offset : offset + limit]
 
@@ -466,6 +562,7 @@ class QueueManager:
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
+                TaskStatus.TIMEOUT,
             ]:
                 logger.warning(
                     f"Task {task_id} cannot be cancelled (status: {task_info.status})"
@@ -474,7 +571,11 @@ class QueueManager:
 
             # Cancel task
             success = await self.task_store.update_task_status(  # type: ignore
-                task_id, TaskStatus.CANCELLED, cancelled_at=datetime.now()
+                task_id,
+                TaskStatus.CANCELLED,
+                cancelled_at=datetime.now(),
+                current_step="cancelled",
+                error_info={"error_type": "Cancelled", "error_message": "Task cancelled"},
             )
 
             if success:
@@ -542,9 +643,22 @@ class QueueManager:
         base_duration = base_durations.get(task_type, 20.0)
 
         # Adjust based on parameters
-        if params.get("steps", 20) > 30:
+        steps = params.get("steps", params.get("num_inference_steps", 20))
+        try:
+            steps_int = int(steps)
+        except Exception:
+            steps_int = 20
+        if steps_int > 30:
             base_duration *= 1.5
-        if params.get("width", 512) * params.get("height", 512) > 1024 * 1024:
+        try:
+            width = int(params.get("width", 512) or 512)
+        except Exception:
+            width = 512
+        try:
+            height = int(params.get("height", 512) or 512)
+        except Exception:
+            height = 512
+        if width * height > 1024 * 1024:
             base_duration *= 1.3
 
         return base_duration

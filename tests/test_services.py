@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 # test_services.py - Test Phase 6 services
 
+import pytest
+
+# These are manual smoke checks that require local model weights and (optionally)
+# a running Redis/Celery stack. Skip in CI/unit runs.
+pytest.skip(
+    "Service smoke tests require local models/redis; run manually if needed.",
+    allow_module_level=True,
+)
+
 import asyncio
 import sys
 import time
 from pathlib import Path
 from PIL import Image
 import numpy as np
-import redis.asyncio as redis
+redis = pytest.importorskip("redis.asyncio", reason="redis package not installed")
 from services.postprocess.face_restore_service import FaceRestoreService
 from services.generation.img2img_service import Img2ImgService
 from services.postprocess.upscale_service import UpscaleService

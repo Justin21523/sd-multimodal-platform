@@ -26,8 +26,17 @@ class FileManager:
     """檔案管理工具類"""
 
     def __init__(self, base_path: Optional[Path] = None):
-        self.base_path = base_path or Path("./outputs")
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        preferred = base_path or Path(getattr(settings, "OUTPUT_PATH", "./outputs"))
+        self.base_path = Path(preferred)
+        try:
+            self.base_path.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            fallback = Path("./outputs")
+            logger.warning(
+                f"Failed to create FileManager base_path at {self.base_path}; falling back to {fallback}: {e}"
+            )
+            self.base_path = fallback
+            self.base_path.mkdir(parents=True, exist_ok=True)
 
     async def save_image(
         self,

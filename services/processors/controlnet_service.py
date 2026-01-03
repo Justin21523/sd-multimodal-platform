@@ -3,36 +3,41 @@
 ControlNet processor management with optimized pipeline handling
 """
 import torch
-import cv2
-import numpy as np
 from PIL import Image
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Union, List, Callable
 import logging
 from pathlib import Path
-import base64
-from io import BytesIO
 
 from diffusers.models.controlnets.controlnet import ControlNetModel
-from diffusers.pipelines.controlnet.pipeline_controlnet import (
+from diffusers import (
+    StableDiffusionControlNetImg2ImgPipeline,
     StableDiffusionControlNetPipeline,
-)
-from diffusers.pipelines.controlnet.pipeline_controlnet_sd_xl import (
+    StableDiffusionXLControlNetImg2ImgPipeline,
     StableDiffusionXLControlNetPipeline,
 )
 
 
-from controlnet_aux import (
-    CannyDetector,
-    OpenposeDetector,
-    MidasDetector,
-    MLSDdetector,
-    NormalBaeDetector,
-)
+try:
+    from controlnet_aux import (  # type: ignore
+        CannyDetector,
+        OpenposeDetector,
+        MidasDetector,
+        MLSDdetector,
+        NormalBaeDetector,
+    )
+
+    CONTROLNET_AUX_AVAILABLE = True
+except Exception:  # pragma: no cover
+    CannyDetector = None  # type: ignore[assignment]
+    OpenposeDetector = None  # type: ignore[assignment]
+    MidasDetector = None  # type: ignore[assignment]
+    MLSDdetector = None  # type: ignore[assignment]
+    NormalBaeDetector = None  # type: ignore[assignment]
+    CONTROLNET_AUX_AVAILABLE = False
 
 from app.config import settings
 from utils.logging_utils import get_generation_logger
 from utils.attention_utils import setup_attention_processor
-from utils.image_utils import preprocess_controlnet_image
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,11 @@ class ControlNetProcessor:
         try:
             logger.info(f"Loading ControlNet: {self.controlnet_type}")
 
+            if not Path(self.model_path).exists():
+                raise FileNotFoundError(
+                    f"ControlNet weights not found at: {self.model_path} (expected local path under {settings.CONTROLNET_PATH})"
+                )
+
             # Load ControlNet model
             self.controlnet_model = ControlNetModel.from_pretrained(
                 self.model_path,
@@ -61,7 +71,8 @@ class ControlNetProcessor:
                 settings.DEVICE  # type: ignore
             )
 
-            # Load corresponding preprocessor
+            # Load corresponding preprocessor (best-effort; ControlNet can still run
+            # with user-supplied, already preprocessed condition images).
             self.preprocessor = self._load_preprocessor()
 
             self.is_loaded = True
@@ -76,6 +87,16 @@ class ControlNetProcessor:
 
     def _load_preprocessor(self):
         """Load the appropriate preprocessor for this ControlNet type"""
+        if self.controlnet_type == "scribble":
+            return None
+
+        if not CONTROLNET_AUX_AVAILABLE:
+            logger.warning(
+                "ControlNet auto-preprocess unavailable (missing `controlnet-aux`). "
+                "Set controlnet.preprocess=false and provide a preprocessed condition image."
+            )
+            return None
+
         preprocessors = {
             "canny": lambda: CannyDetector(),
             "openpose": lambda: OpenposeDetector.from_pretrained(
@@ -91,14 +112,30 @@ class ControlNetProcessor:
 
         preprocessor_loader = preprocessors.get(self.controlnet_type)
         if preprocessor_loader:
-            return preprocessor_loader()
+            try:
+                return preprocessor_loader()
+            except Exception as e:
+                logger.warning(
+                    "ControlNet preprocessor load failed; auto-preprocess disabled. "
+                    "Set controlnet.preprocess=false or ensure annotators are available.",
+                    extra={"controlnet_type": self.controlnet_type, "error": str(e)},
+                )
+                return None
         return None
 
-    def preprocess_image(self, image: Image.Image, **kwargs) -> Image.Image:
+    def preprocess_image(
+        self, image: Image.Image, preprocess: bool = True, **kwargs
+    ) -> Image.Image:
         """Process input image to generate control condition"""
-        if not self.preprocessor:
-            # For manual conditions like scribble, return as-is
+        if not preprocess or self.controlnet_type == "scribble":
             return image
+
+        if not self.preprocessor:
+            raise RuntimeError(
+                "ControlNet auto-preprocess is not available. "
+                "Install `controlnet-aux` (and annotators), or set controlnet.preprocess=false "
+                "and pass a preprocessed condition image."
+            )
 
         try:
             if self.controlnet_type == "canny":
@@ -129,7 +166,10 @@ class ControlNetProcessor:
 
         except Exception as e:
             logger.error(f"Preprocessing failed for {self.controlnet_type}: {str(e)}")
-            return image
+            raise RuntimeError(
+                "ControlNet auto-preprocess failed. "
+                "Set controlnet.preprocess=false to skip preprocessing, or fix annotator installation."
+            ) from e
 
     def unload(self):
         """Unload model to free memory"""
@@ -161,6 +201,7 @@ class ControlNetManager:
         if self._initialized:
             return
 
+        # NOTE: processors are keyed by "<variant>:<type>" where variant is "sd" or "sdxl".
         self.processors: Dict[str, ControlNetProcessor] = {}
         self.supported_types = [
             "canny",
@@ -172,15 +213,24 @@ class ControlNetManager:
         ]
         self.current_pipeline: Optional[
             Union[
-                StableDiffusionControlNetPipeline, StableDiffusionXLControlNetPipeline
+                StableDiffusionControlNetPipeline,
+                StableDiffusionXLControlNetPipeline,
+                StableDiffusionControlNetImg2ImgPipeline,
+                StableDiffusionXLControlNetImg2ImgPipeline,
             ]
         ] = None
+        self.current_pipeline_key: Optional[tuple[str, str, str]] = None
         self._initialized = True
 
     async def initialize(
-        self, controlnet_types: List[str] = ["canny", "openpose"]
+        self, controlnet_types: List[str] = ["canny", "openpose"], variant: str = "sd"
     ) -> bool:
-        """Initialize specified ControlNet processors"""
+        """Initialize specified ControlNet processors.
+
+        variant:
+        - "sd":   SD 1.5/2.x ControlNet weights
+        - "sdxl": SDXL ControlNet weights (only some types available)
+        """
         if controlnet_types is None:
             controlnet_types = ["canny", "openpose"]  # Default minimal set
 
@@ -191,14 +241,19 @@ class ControlNetManager:
             if controlnet_type not in self.supported_types:
                 logger.warning(f"Unsupported ControlNet type: {controlnet_type}")
                 continue
+            processor_key = self._get_processor_key(controlnet_type, variant)
+            existing = self.processors.get(processor_key)
+            if existing and existing.is_loaded:
+                success_count += 1
+                continue
 
             processor = ControlNetProcessor(
                 controlnet_type=controlnet_type,
-                model_path=self._get_model_path(controlnet_type),
+                model_path=self._get_model_path(controlnet_type, variant),
             )
 
             if await processor.load():
-                self.processors[controlnet_type] = processor
+                self.processors[processor_key] = processor
                 success_count += 1
             else:
                 logger.error(f"Failed to load {controlnet_type}")
@@ -208,39 +263,81 @@ class ControlNetManager:
         )
         return success_count > 0
 
-    def _get_model_path(self, controlnet_type: str) -> str:
-        """Get model path for specific ControlNet type"""
+    def _get_processor_key(self, controlnet_type: str, variant: str) -> str:
+        return f"{variant}:{controlnet_type}"
+
+    def _infer_variant_from_base_model(self, base_model_path: str) -> str:
+        return "sdxl" if "xl" in str(base_model_path).lower() else "sd"
+
+    def _get_model_path(self, controlnet_type: str, variant: str) -> str:
+        """Get local model path for specific ControlNet type/variant.
+
+        Storage layout follows ~/Desktop/data_model_structure.md:
+        - SD weights:   {CONTROLNET_PATH}/sd/<type>
+        - SDXL weights: {CONTROLNET_PATH}/sdxl/<type>-sdxl (only canny/openpose/depth)
+        """
         base_path = Path(settings.CONTROLNET_PATH)
 
-        # Standard model mappings
-        model_mappings = {
-            "canny": "sd-controlnet-canny",
-            "openpose": "sd-controlnet-openpose",
-            "depth": "sd-controlnet-depth",
-            "mlsd": "sd-controlnet-mlsd",
-            "normal": "sd-controlnet-normal",
-            "scribble": "sd-controlnet-scribble",
-        }
+        if variant == "sdxl":
+            sdxl_map = {
+                "canny": "canny-sdxl",
+                "openpose": "openpose-sdxl",
+                "depth": "depth-sdxl",
+            }
+            model_dir = sdxl_map.get(controlnet_type)
+            if not model_dir:
+                raise ValueError(
+                    f"ControlNet type '{controlnet_type}' does not have an SDXL weight mapping"
+                )
+            return str((base_path / "sdxl" / model_dir).resolve())
 
-        model_name = model_mappings.get(
-            controlnet_type, f"sd-controlnet-{controlnet_type}"
-        )
-        return str(base_path / model_name)
+        # Default: SD 1.5/2.x weights
+        return str((base_path / "sd" / controlnet_type).resolve())
 
-    async def create_pipeline(self, base_model_path: str, controlnet_type: str) -> bool:
-        """Create ControlNet pipeline with base model"""
+    async def create_pipeline(
+        self, base_model_path: str, controlnet_type: str, pipeline_mode: str = "img2img"
+    ) -> bool:
+        """Create ControlNet pipeline with base model.
+
+        pipeline_mode:
+        - img2img: StableDiffusion{XL}ControlNetImg2ImgPipeline (uses init image + control image)
+        - txt2img: StableDiffusion{XL}ControlNetPipeline (uses only control image)
+        """
         try:
-            if controlnet_type not in self.processors:
-                logger.error(f"ControlNet {controlnet_type} not loaded")
+            if pipeline_mode not in {"img2img", "txt2img"}:
+                raise ValueError(f"Unsupported pipeline_mode: {pipeline_mode}")
+
+            variant = self._infer_variant_from_base_model(base_model_path)
+            processor_key = self._get_processor_key(controlnet_type, variant)
+            if processor_key not in self.processors:
+                await self.initialize([controlnet_type], variant=variant)
+            if processor_key not in self.processors:
+                logger.error(
+                    f"ControlNet {controlnet_type} not loaded",
+                    extra={"variant": variant, "base_model_path": base_model_path},
+                )
                 return False
 
-            processor = self.processors[controlnet_type]
+            pipeline_key = (base_model_path, controlnet_type, pipeline_mode)
+            if self.current_pipeline is not None and self.current_pipeline_key == pipeline_key:
+                return True
+
+            processor = self.processors[processor_key]
 
             # Determine pipeline type based on model
-            if "xl" in base_model_path.lower():
-                pipeline_class = StableDiffusionXLControlNetPipeline
+            is_xl = "xl" in base_model_path.lower()
+            if pipeline_mode == "img2img":
+                pipeline_class = (
+                    StableDiffusionXLControlNetImg2ImgPipeline
+                    if is_xl
+                    else StableDiffusionControlNetImg2ImgPipeline
+                )
             else:
-                pipeline_class = StableDiffusionControlNetPipeline
+                pipeline_class = (
+                    StableDiffusionXLControlNetPipeline
+                    if is_xl
+                    else StableDiffusionControlNetPipeline
+                )
 
             # Create pipeline
             self.current_pipeline = pipeline_class.from_pretrained(
@@ -251,6 +348,7 @@ class ControlNetManager:
                 safety_checker=None,  # Disable for performance
                 requires_safety_checker=False,
             ).to(settings.DEVICE)
+            self.current_pipeline_key = pipeline_key
 
             # Apply optimizations
             setup_attention_processor(
@@ -273,8 +371,11 @@ class ControlNetManager:
     async def generate_with_controlnet(
         self,
         prompt: str,
+        init_image: Optional[Image.Image],
         control_image: Image.Image,
         controlnet_type: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        callback_steps: int = 1,
         **generation_kwargs,
     ) -> Dict[str, Any]:
         """Generate image with ControlNet conditioning"""
@@ -285,33 +386,85 @@ class ControlNetManager:
                 raise ValueError("No ControlNet pipeline loaded")
 
             # Preprocess control image
-            processor = self.processors[controlnet_type]
+            if not self.current_pipeline_key:
+                raise ValueError("No ControlNet pipeline key found")
+            variant = self._infer_variant_from_base_model(self.current_pipeline_key[0])
+            processor_key = self._get_processor_key(controlnet_type, variant)
+            if processor_key not in self.processors:
+                raise ValueError(
+                    f"ControlNet {controlnet_type} not loaded for variant={variant}"
+                )
+            processor = self.processors[processor_key]
+            controlnet_params = generation_kwargs.get("controlnet_params", {}) or {}
             processed_control = processor.preprocess_image(
-                control_image, **generation_kwargs.get("controlnet_params", {})
+                control_image,
+                preprocess=bool(controlnet_params.get("preprocess", True)),
+                **controlnet_params,
             )
 
-            # Generation parameters
-            generation_params = {
-                "prompt": prompt,
-                "image": processed_control,
-                "num_inference_steps": generation_kwargs.get("num_inference_steps", 25),
-                "guidance_scale": generation_kwargs.get("guidance_scale", 7.5),
-                "controlnet_conditioning_scale": generation_kwargs.get(
-                    "controlnet_strength", 1.0
-                ),
-                "generator": (
-                    torch.Generator(device=settings.DEVICE).manual_seed(
-                        generation_kwargs.get("seed", -1)
-                    )
-                    if generation_kwargs.get("seed", -1) != -1
-                    else None
-                ),
-            }
+            seed = generation_kwargs.get("seed", None)
+            generator = None
+            if seed is not None and seed != -1:
+                generator = torch.Generator(device=settings.DEVICE).manual_seed(int(seed))
+
+            negative_prompt = generation_kwargs.get("negative_prompt", "")
+            num_inference_steps = generation_kwargs.get("num_inference_steps", 25)
+            guidance_scale = generation_kwargs.get("guidance_scale", 7.5)
+            controlnet_strength = generation_kwargs.get("controlnet_strength", 1.0)
+            strength = generation_kwargs.get("strength", 0.75)
+            guidance_start = generation_kwargs.get("guidance_start", 0.0)
+            guidance_end = generation_kwargs.get("guidance_end", 1.0)
+
+            if self.current_pipeline_key and self.current_pipeline_key[2] == "txt2img":
+                # txt2img: pipeline expects control condition as `image`.
+                pipeline_params: Dict[str, Any] = {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "image": processed_control,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "controlnet_conditioning_scale": controlnet_strength,
+                    "generator": generator,
+                }
+            else:
+                # img2img: pipeline expects init image + control image.
+                if init_image is None:
+                    raise ValueError("init_image is required for ControlNet img2img")
+                pipeline_params = {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "image": init_image,
+                    "control_image": processed_control,
+                    "strength": strength,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "controlnet_conditioning_scale": controlnet_strength,
+                    "control_guidance_start": guidance_start,
+                    "control_guidance_end": guidance_end,
+                    "generator": generator,
+                }
+
+                width = generation_kwargs.get("width", None)
+                height = generation_kwargs.get("height", None)
+                if isinstance(width, int) and isinstance(height, int):
+                    pipeline_params.update({"width": width, "height": height})
+
+            if progress_callback is not None:
+                stride = max(1, int(callback_steps))
+
+                def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
+                    try:
+                        progress_callback(step, int(num_inference_steps))
+                    except Exception:
+                        pass
+
+                pipeline_params["callback"] = _cb
+                pipeline_params["callback_steps"] = stride
 
             # Generate
             gen_logger.info(f"Starting ControlNet generation: {controlnet_type}")
             with torch.inference_mode():
-                result = self.current_pipeline(**generation_params)
+                result = self.current_pipeline(**pipeline_params)  # type: ignore[misc]
 
             # Extract images safely
             if hasattr(result, "images") and result.images:  # type: ignore
@@ -323,11 +476,28 @@ class ControlNetManager:
 
             gen_logger.info(f"✅ ControlNet generation completed: {len(images)} images")
 
+            init_size = (
+                (init_image.width, init_image.height) if init_image is not None else None
+            )
             return {
                 "images": images,
                 "controlnet_type": controlnet_type,
-                "control_image": processed_control,
-                "generation_params": generation_params,
+                "init_image_size": init_size,
+                "control_image_size": (processed_control.width, processed_control.height),
+                "generation_params": {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "strength": strength,
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": guidance_scale,
+                    "controlnet_conditioning_scale": controlnet_strength,
+                    "seed": seed,
+                    "control_guidance_start": guidance_start,
+                    "control_guidance_end": guidance_end,
+                    "pipeline_mode": (
+                        self.current_pipeline_key[2] if self.current_pipeline_key else "img2img"
+                    ),
+                },
             }
 
         except Exception as e:
@@ -340,7 +510,9 @@ class ControlNetManager:
             "loaded_processors": list(self.processors.keys()),
             "supported_types": self.supported_types,
             "pipeline_loaded": self.current_pipeline is not None,
+            "pipeline_mode": (self.current_pipeline_key[2] if self.current_pipeline_key else None),
             "total_vram_usage": self._estimate_vram_usage(),
+            "preprocess_available": CONTROLNET_AUX_AVAILABLE,
         }
 
     def _estimate_vram_usage(self) -> str:

@@ -1,3 +1,22 @@
+# SD Multi-Modal Platform
+
+## ✅ 快速開始（目前推薦流程）
+
+- 啟用環境：`conda activate ai_env`
+- 依照 `~/Desktop/data_model_structure.md`：
+  - 模型：`/mnt/c/ai_models`
+  - 快取：`/mnt/c/ai_cache`（建議設定 `HF_HOME`/`TRANSFORMERS_CACHE`/`TORCH_HOME`/`XDG_CACHE_HOME`）
+  - 產出：`/mnt/data/training/runs/sd-multimodal-platform/outputs`
+- 設定環境：`cp .env.example .env`（不要提交 secrets）
+- 啟動後端：`uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+- （可選）啟用非同步佇列（Redis + Celery worker）：
+  - Redis（擇一）：`redis-server` 或 `docker run -p 6379:6379 redis:7-alpine`
+  - Worker：`celery -A app.workers.celery_worker worker --loglevel=info --queues=generation,postprocess`
+- 啟動前端（React）：`cd frontend/react && npm install && VITE_API_BASE_URL=http://localhost:8000 npm run dev`
+- API 文件：`http://localhost:8000/api/v1/docs`（健康檢查：`http://localhost:8000/health`）
+
+> 備註：下方的「資料夾架構」區塊包含早期原型（`backend/`、`frontend/web/` 等），目前主要後端以 `app/` 為準、主要前端以 `frontend/react/` 為準。
+
 # 📁 專案資料夾架構
 
 ```

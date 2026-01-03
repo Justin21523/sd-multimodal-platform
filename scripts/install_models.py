@@ -7,6 +7,7 @@ Supports base models, ControlNet, and automatic dependency management.
 
 import os
 import logging
+import shutil
 from contextlib import asynccontextmanager
 import sys
 import time
@@ -27,7 +28,8 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import (
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from huggingface_hub import snapshot_download, hf_hub_download
+from app.shared_cache import shared_cache  # noqa: F401  (side-effect: set cache env vars)
+from huggingface_hub import hf_hub_download
 from app.config import settings
 from utils.file_utils import ensure_directory, get_file_size, get_directory_size
 from utils.logging_utils import setup_logging
@@ -39,7 +41,7 @@ MODEL_CONFIGS = {
     "sdxl-base": {
         "repo_id": "stabilityai/stable-diffusion-xl-base-1.0",
         "pipeline_class": StableDiffusionXLPipeline,
-        "local_path": "sdxl/sdxl-base",
+        "local_path": "stable-diffusion/sdxl-base",
         "vram_requirement": "8GB",
         "recommended_resolution": "1024x1024",
         "description": "High-quality photorealistic generation, best for commercial/advertising use",
@@ -245,7 +247,8 @@ class ModelInstaller:
     """Manages model download and installation process."""
 
     def __init__(self):
-        self.base_path = Path(settings.OUTPUT_PATH).parent / "models"
+        # Models MUST live under /mnt/c/ai_models per ~/Desktop/data_model_structure.md
+        self.base_path = Path(settings.MODELS_PATH)
         self.base_path.mkdir(parents=True, exist_ok=True)
         self.downloaded_models = []
         self.failed_downloads = []
@@ -267,11 +270,19 @@ class ModelInstaller:
             target_dir = self.base_path / "vae" / model_id
         elif model_type == "postprocess":
             if "esrgan" in model_id:
-                target_dir = self.base_path / "upscale" / "real-esrgan"
+                target_dir = self.base_path / "upscale"
             elif "gfpgan" in model_id or "codeformer" in model_id:
-                target_dir = self.base_path / "face-restore" / model_id
+                target_dir = self.base_path / "face-restore"
             else:
                 target_dir = self.base_path / "postprocess" / model_id
+
+            model_config = POSTPROCESS_MODELS.get(model_id)
+            expected_files = []
+            if model_config:
+                for filename in model_config.get("files", []):
+                    expected_files.append(target_dir / Path(filename).name)
+            if expected_files:
+                return all(p.exists() and p.is_file() for p in expected_files)
         else:
             return False
 
@@ -501,9 +512,9 @@ class ModelInstaller:
 
         # Determine target directory
         if "esrgan" in model_id:
-            target_dir = self.base_path / "upscale" / "real-esrgan"
-        elif "gfpgan" in model_id:
-            target_dir = self.base_path / "face-restore" / "gfpgan"
+            target_dir = self.base_path / "upscale"
+        elif "gfpgan" in model_id or "codeformer" in model_id:
+            target_dir = self.base_path / "face-restore"
         else:
             target_dir = self.base_path / "postprocess" / model_id
 
@@ -518,15 +529,18 @@ class ModelInstaller:
             total_size = 0
 
             if files:
-                # Download specific files
+                # Download specific files into a flat layout expected by runtime services
+                # (e.g. {MODELS_PATH}/upscale/RealESRGAN_x4plus.pth).
                 for filename in files:
-                    file_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=target_dir,
-                        local_dir_use_symlinks=False,
-                    )
-                    total_size += get_file_size(file_path)
+                    dest_path = target_dir / Path(filename).name
+                    if dest_path.exists():
+                        logger.info(f"✅ {dest_path.name} already exists, skipping")
+                        total_size += dest_path.stat().st_size
+                        continue
+
+                    cached_path = hf_hub_download(repo_id=repo_id, filename=filename)
+                    shutil.copy2(cached_path, dest_path)
+                    total_size += dest_path.stat().st_size
             else:
                 # Download entire repository
                 downloaded_path = snapshot_download(
@@ -1008,11 +1022,9 @@ def verify_existing_models(installer: ModelInstaller):
                     model_path = installer.base_path / "vae" / model_id
                 elif model_type == "postprocess":
                     if "esrgan" in model_id:
-                        model_path = installer.base_path / "upscale" / "real-esrgan"
-                    elif "gfpgan" in model_id:
-                        model_path = installer.base_path / "face-restore" / "gfpgan"
-                    elif "codeformer" in model_id:
-                        model_path = installer.base_path / "face-restore" / "codeformer"
+                        model_path = installer.base_path / "upscale"
+                    elif "gfpgan" in model_id or "codeformer" in model_id:
+                        model_path = installer.base_path / "face-restore"
                     else:
                         model_path = installer.base_path / "postprocess" / model_id
 

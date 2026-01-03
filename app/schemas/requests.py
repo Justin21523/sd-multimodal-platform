@@ -4,13 +4,12 @@ Request schemas for SD Multi-Modal Platform API endpoints.
 Defines Pydantic models for request validation and documentation.
 """
 
-from typing import Optional, Dict, Any, List, Literal, Annotated
-from pydantic import BaseModel, field_validator, Field, conlist, Field
-from pydantic_settings import BaseSettings
-import re
-import random
-from io import BytesIO
+from typing import Optional, Dict, Any, List, Literal
+
 import base64
+import re
+
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from app.config import settings
 
 
@@ -22,6 +21,10 @@ class ControlNetConfig(BaseModel):
         ..., description="ControlNet processor type"
     )
     image: str = Field(..., description="Base64 encoded condition image")
+    preprocess: bool = Field(
+        default=True,
+        description="Whether to auto-preprocess the control image (requires controlnet-aux/annotators).",
+    )
     strength: float = Field(
         default=1.0, ge=0.0, le=2.0, description="ControlNet influence strength"
     )
@@ -84,78 +87,49 @@ class GenerationParams(BaseModel):
 class Txt2ImgRequest(BaseModel):
     """Request schema for text-to-image generation."""
 
-    prompt: str = Field(
-        ...,
-        min_length=1,
-        max_length=2000,
-        description="Text prompt describing the desired image",
-    )
-    negative_prompt: str = Field(
-        default="",
-        max_length=2000,
-        description="Negative prompt to avoid unwanted elements",
-    )
-    steps: int = Field(default=20, ge=1, le=settings.MAX_STEPS)
-    cfg_scale: float = Field(default=7.0, ge=1.0, le=settings.MAX_CFG)
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    negative_prompt: str = Field(default="", max_length=2000)
 
-    # Source image (required)
-    image: str = Field(..., description="Base64 encoded source image")
+    model_id: Optional[str] = Field(default=None, description="Model ID (optional)")
+    user_id: Optional[str] = Field(default=None, description="User ID (optional)")
 
-    # Core parameters
-    strength: float = Field(
-        default=0.75, ge=0.0, le=1.0, description="Noise injection strength"
-    )
-    model_id: Optional[str] = Field(
-        default=None, description="Specific model to use (auto-select if None)"
-    )
-    width: int = Field(
-        default=0, ge=256, le=2048, description="Image width (model default if None)"
-    )  # typoe: ignore
-
-    height: int = Field(
-        default=0,
-        ge=256,
-        le=2048,
-        description="Image height (model default if None)",
-    )
-    sampler: str = Field(default="DPM++ 2M Karras")
-    batch_size: int = Field(default=1, ge=1, le=4)
+    width: int = Field(default=settings.DEFAULT_WIDTH, ge=256, le=2048)
+    height: int = Field(default=settings.DEFAULT_HEIGHT, ge=256, le=2048)
     num_inference_steps: int = Field(
-        default=25, ge=10, le=100, description="Number of denoising steps"
+        default=settings.DEFAULT_STEPS,
+        ge=1,
+        le=settings.MAX_STEPS,
+        validation_alias=AliasChoices("num_inference_steps", "steps"),
     )
     guidance_scale: float = Field(
-        default=7.5, ge=1.0, le=20.0, description="CFG scale for prompt adherence"
+        default=settings.DEFAULT_CFG,
+        ge=1.0,
+        le=settings.MAX_CFG,
+        validation_alias=AliasChoices("guidance_scale", "cfg_scale"),
     )
-    seed: Optional[int] = Field(
-        default=None, ge=-1, le=2**32 - 1, description="Random seed (-1 for random)"
-    )
-    # Optional ControlNet
-    controlnet: Optional[ControlNetConfig] = Field(default=None)
+    seed: Optional[int] = Field(default=None, ge=-1, le=2**32 - 1)
+    num_images: int = Field(default=1, ge=1, le=settings.MAX_BATCH_SIZE)
 
-    num_images: int = Field(
-        default=1,
-        ge=1,
-        le=4,  # Will be validated against settings.MAX_BATCH_SIZE
-        description="Number of images to generate",
-    )
-    save_images: bool = Field(
-        default=True, description="Whether to save images to disk"
-    )
-    return_base64: bool = Field(
-        default=False, description="Include base64 encoded images in response"
-    )
+    save_images: bool = True
+    return_base64: bool = False
 
     @field_validator("width", "height", mode="before")
-    def validate_dimensions(cls, v):
-        """Ensure dimensions are multiples of 8 for SD compatibility."""
-        if v is not None and v % 8 != 0:
-            # Round to nearest multiple of 8
+    @classmethod
+    def normalize_dimensions(cls, v, info):
+        if v is None or v == 0 or (isinstance(v, str) and not v.strip()):
+            return settings.DEFAULT_WIDTH if info.field_name == "width" else settings.DEFAULT_HEIGHT
+        if isinstance(v, str):
+            m = re.search(r"\d+", v)
+            if not m:
+                raise ValueError("width/height must be an integer")
+            v = int(m.group())
+        if v % 8 != 0:
             v = ((v + 7) // 8) * 8
         return v
 
     @field_validator("seed", mode="before")
-    def handle_negative_seed(cls, v):
-        """Convert -1 to None for random seed."""
+    @classmethod
+    def normalize_seed(cls, v):
         if v is None:
             return None
         if isinstance(v, str) and not v.strip():
@@ -164,44 +138,70 @@ class Txt2ImgRequest(BaseModel):
             return None
         return v
 
-    @field_validator("init_image")
-    @classmethod
-    def validate_init_image(cls, v: str) -> str:
-        """Validate source image"""
-        return ControlNetConfig.validate_base64_image(v)
-
 
 class Img2ImgRequest(BaseModel):
     """Image-to-image generation request"""
 
     prompt: str = Field(..., min_length=1, max_length=2000)
     negative_prompt: str = Field(default="", max_length=2000)
+    user_id: Optional[str] = Field(default=None, description="User ID (optional)")
 
-    # Source image (required)
-    image: str = Field(..., description="Base64 encoded source image")
-    strength: float = Field(default=0.75, ge=0.0, le=1.0)
-
-    # Core parameters
-    strength: float = Field(
-        default=0.75, ge=0.0, le=1.0, description="Noise injection strength"
+    init_image: str = Field(
+        ...,
+        description="Base64 encoded source image",
+        validation_alias=AliasChoices("init_image", "image"),
     )
+    strength: float = Field(default=0.75, ge=0.0, le=1.0)
     model_id: Optional[str] = Field(default=None)
 
     # Generation parameters (inherit defaults from config)
     width: Optional[int] = Field(default=None, ge=256, le=2048)
     height: Optional[int] = Field(default=None, ge=256, le=2048)
-    num_inference_steps: int = Field(default=25, ge=10, le=100)
-    guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
-    seed: Optional[int] = Field(default=None)
+    num_inference_steps: int = Field(
+        default=settings.DEFAULT_STEPS,
+        ge=1,
+        le=settings.MAX_STEPS,
+        validation_alias=AliasChoices("num_inference_steps", "steps"),
+    )
+    guidance_scale: float = Field(
+        default=settings.DEFAULT_CFG,
+        ge=1.0,
+        le=settings.MAX_CFG,
+        validation_alias=AliasChoices("guidance_scale", "cfg_scale"),
+    )
+    seed: Optional[int] = Field(default=None, ge=-1, le=2**32 - 1)
 
     # Optional ControlNet
     controlnet: Optional[ControlNetConfig] = Field(default=None)
 
-    @field_validator("image")
-    def validate_image_size(cls, v):
-        # Basic base64 size check (rough estimate)
-        if len(v) > settings.MAX_UPLOAD_MB * 1024 * 1024 * 1.33:  # base64 overhead
-            raise ValueError(f"Image size exceeds {settings.MAX_UPLOAD_MB}MB limit")
+    @field_validator("init_image")
+    @classmethod
+    def validate_init_image(cls, v: str) -> str:
+        return ControlNetConfig.validate_base64_image(v)
+
+    @field_validator("width", "height", mode="before")
+    @classmethod
+    def normalize_optional_dimensions(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if isinstance(v, str):
+            m = re.search(r"\d+", v)
+            if not m:
+                raise ValueError("width/height must be an integer")
+            v = int(m.group())
+        if v % 8 != 0:
+            v = ((v + 7) // 8) * 8
+        return v
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def normalize_seed(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        if str(v) == "-1":
+            return None
         return v
 
 
@@ -212,11 +212,11 @@ class CaptionRequest(BaseModel):
     image_url: Optional[str] = None
     max_length: int = Field(default=50, ge=10, le=200)
 
-    @field_validator("image", "image_url")
-    def validate_image_source(cls, v, values, **kwargs):
-        if not values.get("image") and not values.get("image_url"):
+    @model_validator(mode="after")
+    def validate_image_source(self):
+        if not self.image and not self.image_url:
             raise ValueError("Either image or image_url must be provided")
-        return v
+        return self
 
 
 class VQARequest(BaseModel):
@@ -227,11 +227,11 @@ class VQARequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000)
     max_length: int = Field(default=100, ge=10, le=500)
 
-    @field_validator("image", "image_url")
-    def validate_image_source(cls, v, values, **kwargs):
-        if not values.get("image") and not values.get("image_url"):
+    @model_validator(mode="after")
+    def validate_image_source(self):
+        if not self.image and not self.image_url:
             raise ValueError("Either image or image_url must be provided")
-        return v
+        return self
 
 
 class QueueSubmitRequest(BaseModel):
@@ -247,6 +247,7 @@ class InpaintRequest(BaseModel):
 
     prompt: str = Field(..., min_length=1, max_length=2000)
     negative_prompt: str = Field(default="", max_length=2000)
+    user_id: Optional[str] = Field(default=None, description="User ID (optional)")
 
     # Required images
     init_image: str = Field(..., description="Base64 encoded source image")

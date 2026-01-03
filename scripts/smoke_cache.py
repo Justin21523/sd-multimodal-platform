@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.shared_cache import shared_cache
 from app.config import settings
-from app.services.models.model_cache import model_cache
+from services.models.model_cache import model_cache
 
 
 def test_cache_setup():

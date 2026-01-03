@@ -1,9 +1,17 @@
 # scripts/download_models.py - Architecture Analysis
+import sys
 from pathlib import Path
 import logging
 from huggingface_hub import snapshot_download
+
+# Ensure repo root is on sys.path so `app/*` and `utils/*` imports work when
+# running `python scripts/download_models.py`.
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
 from utils.logging_utils import setup_logging, get_request_logger
-from app.services.models.sd_models import get_model_manager
+from app.shared_cache import shared_cache  # noqa: F401  (side-effect: set cache env vars)
+from app.config import settings
 import argparse
 
 # Set up logging
@@ -22,7 +30,7 @@ class ModelDownloader:
     5. **Error Handling**: Comprehensive exception management
     """
 
-    def __init__(self, base_path: str = "models"):
+    def __init__(self, base_path: str = settings.MODELS_PATH):
         # Design Pattern: Dependency Injection
         # Allows different base paths for dev/test/prod environments
         self.base_path = Path(base_path)
@@ -129,7 +137,11 @@ def main():
 
     # Modifier Options
     parser.add_argument("--force", action="store_true", help="Force re-download")
-    parser.add_argument("--base-path", default="models", help="Custom model directory")
+    parser.add_argument(
+        "--base-path",
+        default=settings.MODELS_PATH,
+        help="Custom model directory (must follow ~/Desktop/data_model_structure.md)",
+    )
 
 
 # Key Benefits of This Architecture:

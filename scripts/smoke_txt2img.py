@@ -15,7 +15,7 @@ from app.dependencies import (
     get_vqa_service,
     get_task_manager,
 )
-from app.shared_cache import shared_cache
+from app.config import settings
 
 
 def test_txt2img_output():
@@ -26,7 +26,7 @@ def test_txt2img_output():
         # This would test the actual txt2img service
         # For now, we'll test the output directory structure
 
-        outputs_dir = os.path.join(shared_cache.cache_root, "outputs")
+        outputs_dir = str(settings.OUTPUT_PATH)
         project_dir = os.path.join(outputs_dir, "smoke_test")
         images_dir = os.path.join(project_dir, "images")
 

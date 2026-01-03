@@ -16,6 +16,7 @@ from app.schemas.requests import Img2ImgRequest, InpaintRequest
 from app.schemas.responses import GenerationResponse
 from services.models.sd_models import get_model_manager
 from services.processors.controlnet_service import get_controlnet_manager
+from services.history import get_history_store
 from utils.logging_utils import get_request_logger, get_generation_logger
 from utils.image_utils import (
     base64_to_pil_image,
@@ -23,7 +24,7 @@ from utils.image_utils import (
     prepare_img2img_image,
     prepare_inpaint_mask,
 )
-from utils.file_utils import save_generation_output
+from utils.file_utils import get_output_url, save_generation_output
 from utils.metadata_utils import save_generation_metadata
 from app.config import settings
 
@@ -101,27 +102,40 @@ async def generate_img2img(
 
             # Prepare control image
             control_image = base64_to_pil_image(request.controlnet.image)
+            control_image = prepare_img2img_image(
+                control_image, target_width=init_image.width, target_height=init_image.height
+            )
+            controlnet_params = {"preprocess": request.controlnet.preprocess}
 
             # Ensure ControlNet pipeline is ready
             if not await controlnet_manager.create_pipeline(
                 model_manager.current_model_path, request.controlnet.type  # type: ignore
             ):
                 raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to setup ControlNet: {request.controlnet.type}",
+                    status_code=503,
+                    detail=f"Failed to setup ControlNet pipeline: {request.controlnet.type}",
                 )
 
-            # Generate with ControlNet
-            controlnet_result = await controlnet_manager.generate_with_controlnet(
-                prompt=request.prompt,
-                control_image=control_image,
-                controlnet_type=request.controlnet.type,
-                negative_prompt=request.negative_prompt,
-                num_inference_steps=request.num_inference_steps,
-                guidance_scale=request.guidance_scale,
-                controlnet_strength=request.controlnet.strength,
-                seed=request.seed,
-            )
+            try:
+                # Generate with ControlNet
+                controlnet_result = await controlnet_manager.generate_with_controlnet(
+                    prompt=request.prompt,
+                    init_image=init_image,
+                    control_image=control_image,
+                    controlnet_type=request.controlnet.type,
+                    negative_prompt=request.negative_prompt,
+                    num_inference_steps=request.num_inference_steps,
+                    guidance_scale=request.guidance_scale,
+                    strength=request.strength,
+                    controlnet_strength=request.controlnet.strength,
+                    guidance_start=request.controlnet.guidance_start,
+                    guidance_end=request.controlnet.guidance_end,
+                    seed=request.seed,
+                    controlnet_params=controlnet_params,
+                )
+            except RuntimeError as e:
+                # Most common: auto-preprocess unavailable / failed.
+                raise HTTPException(status_code=503, detail=str(e))
 
             generated_images = controlnet_result["images"]
 
@@ -151,11 +165,21 @@ async def generate_img2img(
 
         # Save images and prepare response
         image_urls = []
+        history_images = []
         for i, image in enumerate(generated_images):
             image_path = await save_generation_output(
                 image, task_id=f"{task_id}_{i}", subfolder="img2img"
             )
-            image_urls.append(str(image_path))
+            image_url = get_output_url(image_path)
+            image_urls.append(image_url)
+            history_images.append(
+                {
+                    "image_path": str(image_path),
+                    "image_url": image_url,
+                    "width": image.width,
+                    "height": image.height,
+                }
+            )
 
         # Prepare metadata
         metadata = {
@@ -185,6 +209,40 @@ async def generate_img2img(
         background_tasks.add_task(
             save_generation_metadata, metadata, task_id, "img2img"
         )
+
+        try:
+            store = get_history_store()
+            input_params = request.model_dump(mode="json", exclude_none=True)
+            history_result = {
+                "success": True,
+                "task_id": task_id,
+                "task_type": "img2img",
+                "prompt": request.prompt,
+                "negative_prompt": request.negative_prompt,
+                "strength": request.strength,
+                "parameters": {
+                    "model_id": target_model,
+                    "steps": request.num_inference_steps,
+                    "cfg_scale": request.guidance_scale,
+                    "seed": request.seed,
+                },
+                "result": {
+                    "images": history_images,
+                    "image_count": len(history_images),
+                    "model_used": model_manager.current_model,
+                },
+                "controlnet_info": metadata.get("controlnet_info"),
+            }
+            store.record_completion(
+                history_id=task_id,
+                task_type="img2img",
+                run_mode="sync",
+                user_id=request.user_id if isinstance(request.user_id, str) and request.user_id else None,
+                input_params=input_params,
+                result_data=history_result,
+            )
+        except Exception as e:
+            req_logger.warning(f"Failed to write history record: {e}")
 
         gen_logger.info(
             "✅ Img2img generation completed",
@@ -320,11 +378,21 @@ async def generate_inpaint(
 
         # Save images
         image_urls = []
+        history_images = []
         for i, image in enumerate(generated_images):
             image_path = await save_generation_output(
                 image, task_id=f"{task_id}_{i}", subfolder="inpaint"
             )
-            image_urls.append(str(image_path))
+            image_url = get_output_url(image_path)
+            image_urls.append(image_url)
+            history_images.append(
+                {
+                    "image_path": str(image_path),
+                    "image_url": image_url,
+                    "width": image.width,
+                    "height": image.height,
+                }
+            )
 
         # Prepare metadata
         metadata = {
@@ -347,6 +415,40 @@ async def generate_inpaint(
         background_tasks.add_task(
             save_generation_metadata, metadata, task_id, "inpaint"
         )
+
+        try:
+            store = get_history_store()
+            input_params = request.model_dump(mode="json", exclude_none=True)
+            history_result = {
+                "success": True,
+                "task_id": task_id,
+                "task_type": "inpaint",
+                "prompt": request.prompt,
+                "negative_prompt": request.negative_prompt,
+                "strength": request.strength,
+                "parameters": {
+                    "model_id": target_model,
+                    "steps": request.num_inference_steps,
+                    "cfg_scale": request.guidance_scale,
+                    "seed": request.seed,
+                },
+                "result": {
+                    "images": history_images,
+                    "image_count": len(history_images),
+                    "model_used": model_manager.current_model,
+                },
+                "inpaint_info": metadata.get("inpaint_info"),
+            }
+            store.record_completion(
+                history_id=task_id,
+                task_type="inpaint",
+                run_mode="sync",
+                user_id=request.user_id if isinstance(request.user_id, str) and request.user_id else None,
+                input_params=input_params,
+                result_data=history_result,
+            )
+        except Exception as e:
+            req_logger.warning(f"Failed to write history record: {e}")
 
         gen_logger.info(
             "✅ Inpaint generation completed",

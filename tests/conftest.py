@@ -14,6 +14,7 @@ from typing import Generator, AsyncGenerator, Optional
 import time
 from unittest.mock import patch, MagicMock
 import torch
+import httpx
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
@@ -34,7 +35,6 @@ os.environ.update(
 )
 
 # Import after setting environment
-from fastapi.testclient import TestClient
 from app.main import app
 from app.config import settings
 
@@ -48,12 +48,13 @@ def event_loop():
 
 
 @pytest.fixture(scope="function")
-def client() -> Generator[TestClient, None, None]:
-    """
-    Create a test client for FastAPI app with clean state for each test.
-    """
-    with TestClient(app) as test_client:
-        yield test_client
+async def client() -> AsyncGenerator[httpx.AsyncClient, None]:
+    """Create an AsyncClient for the FastAPI app (no threads/TestClient)."""
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as async_client:
+        yield async_client
 
 
 @pytest.fixture(scope="function")

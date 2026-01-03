@@ -14,6 +14,18 @@ import torch
 
 from services.models.sd_models import ModelManager, ModelRegistry, get_model_manager
 from app.api.v1.txt2img import Txt2ImgRequest
+from app.config import settings
+
+
+def _has_local_models() -> bool:
+    """Best-effort check for local model installation under MODELS_PATH."""
+    try:
+        model_info = ModelRegistry.get_model_info("sdxl-base")
+        if not model_info:
+            return False
+        return (Path(settings.MODELS_PATH) / model_info["local_path"]).exists()  # type: ignore[index]
+    except Exception:
+        return False
 
 
 class TestModelRegistry:
@@ -108,7 +120,9 @@ class TestModelManagerIntegration:
             assert not manager.is_initialized
             assert manager.current_model_id is None
 
-    @pytest.mark.skipif(not Path("models").exists(), reason="Models not downloaded")
+    @pytest.mark.skipif(
+        not _has_local_models(), reason="Models not installed under MODELS_PATH"
+    )
     async def test_initialize_with_models(self, manager):
         """Test initialization when models are available."""
         success = await manager.initialize()
@@ -119,7 +133,9 @@ class TestModelManagerIntegration:
             assert manager.current_pipeline is not None
             assert manager.startup_time > 0
 
-    @pytest.mark.skipif(not Path("models").exists(), reason="Models not downloaded")
+    @pytest.mark.skipif(
+        not _has_local_models(), reason="Models not installed under MODELS_PATH"
+    )
     async def test_model_switching(self, manager):
         """Test switching between models."""
         # Initialize with default model
@@ -137,7 +153,7 @@ class TestModelManagerIntegration:
         for model_id in available_models:
             if model_id != original_model:
                 model_info = ModelRegistry.get_model_info(model_id)
-                model_path = Path("models") / model_info["local_path"]  # type: ignore
+                model_path = Path(settings.MODELS_PATH) / model_info["local_path"]  # type: ignore
                 if model_path.exists():
                     target_model = model_id
                     break
@@ -147,7 +163,9 @@ class TestModelManagerIntegration:
             if success:
                 assert manager.current_model_id == target_model
 
-    @pytest.mark.skipif(not Path("models").exists(), reason="Models not downloaded")
+    @pytest.mark.skipif(
+        not _has_local_models(), reason="Models not installed under MODELS_PATH"
+    )
     async def test_image_generation_mock(self, manager):
         """Test image generation with mocked pipeline."""
         # Initialize manager
@@ -248,7 +266,7 @@ class TestTxt2ImgAPISchema:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not Path("models").exists(), reason="Models not downloaded")
+@pytest.mark.skipif(not _has_local_models(), reason="Models not installed under MODELS_PATH")
 class TestFullGenerationFlow:
     """End-to-end integration tests for the full generation flow."""
 

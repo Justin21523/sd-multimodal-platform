@@ -19,7 +19,7 @@ import pynvml as nvml
 
 from app.config import Settings, settings, get_settings
 from app.schemas.requests import HealthCheckRequest
-from app.schemas.responses import HealthResponse
+from app.schemas.responses import HealthResponse  # noqa: F401
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -29,7 +29,6 @@ router = APIRouter()
     "/health",
     summary="System Health Check",
     description="Comprehensive health check including hardware and service status",
-    response_model=HealthResponse,
 )
 async def health_check(request: Request) -> Dict[str, Any]:
     """

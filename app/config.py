@@ -7,7 +7,7 @@ Configuration management with Phase 5 queue and post-processing settings
 import os
 from pathlib import Path
 from typing import List, Optional, Literal, Dict, Any
-from pydantic import Field, field_validator, computed_field
+from pydantic import Field, field_validator, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import re
 import torch
@@ -28,8 +28,13 @@ class Settings(BaseSettings):
     )
     DEBUG: bool = False
 
-    # Shared Cache Settings
-    AI_CACHE_ROOT: str = "/mnt/c/web-projects/AI_LLM_projects/ai_warehouse"
+    # Shared Cache / Storage Roots (must follow ~/Desktop/data_model_structure.md)
+    # - caches: /mnt/c/ai_cache
+    # - models: /mnt/c/ai_models
+    # - outputs: /mnt/data/...
+    AI_CACHE_ROOT: str = "/mnt/c/ai_cache"
+    AI_MODELS_ROOT: str = "/mnt/c/ai_models"
+    AI_OUTPUT_ROOT: str = "/mnt/data/training/runs/sd-multimodal-platform"
 
     # Model Settings
     SD_MODEL: str = "runwayml/stable-diffusion-v1-5"
@@ -44,7 +49,7 @@ class Settings(BaseSettings):
     HOST: str = Field(default="0.0.0.0", description="Server host")
     PORT: int = Field(default=8000, description="Server port")
     ALLOWED_ORIGINS: str = Field(
-        default="http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000",
+        default="http://localhost:3000,http://localhost:8080,http://localhost:5173,http://localhost:4173,http://127.0.0.1:3000,http://127.0.0.1:5173",
         description="CORS allowed origins (comma-separated)",
     )
 
@@ -100,10 +105,12 @@ class Settings(BaseSettings):
         default=False, description="Enable PyTorch 2.0+ model compilation"
     )
 
-    # Model paths
-    MODEL_BASE_PATH: Path = Path("./models")
-    OUTPUT_BASE_PATH: Path = Path("./outputs")
-    CACHE_BASE_PATH: Path = Path("./cache")
+    # Model paths (Path objects used by validators/helpers)
+    MODEL_BASE_PATH: Path = Path("/mnt/c/ai_models")
+    OUTPUT_BASE_PATH: Path = Path(
+        "/mnt/data/training/runs/sd-multimodal-platform/outputs"
+    )
+    CACHE_BASE_PATH: Path = Path("/mnt/c/ai_cache")
 
     # Primary models
     PRIMARY_SD_MODEL: str = "sdxl-base"  # "sdxl-base", "sd-1.5", "pixart-sigma"
@@ -117,19 +124,27 @@ class Settings(BaseSettings):
     FALLBACK_SD_MODEL: str = "sd-1.5"
 
     # === Path Configuration ===
-    MODELS_PATH: str = Field(default="./models", description="Base models directory")
+    MODELS_PATH: str = Field(
+        default="/mnt/c/ai_models", description="Base models directory"
+    )
     SD_MODEL_PATH: str = Field(
-        default="./models/stable-diffusion", description="SD models path"
+        default="/mnt/c/ai_models/stable-diffusion", description="SD models path"
     )
     SDXL_MODEL_PATH: str = Field(
-        default="./models/sdxl", description="SDXL models path"
+        default="/mnt/c/ai_models/stable-diffusion/sdxl",
+        description="SDXL models path",
     )
     CONTROLNET_PATH: str = Field(
-        default="./models/controlnet", description="ControlNet models path"
+        default="/mnt/c/ai_models/controlnet", description="ControlNet models path"
     )
-    LORA_PATH: str = Field(default="./models/lora", description="LoRA models path")
-    VAE_PATH: str = Field(default="./models/vae", description="VAE models path")
-    OUTPUT_PATH: str = Field(default="./outputs", description="Generated outputs path")
+    LORA_PATH: str = Field(
+        default="/mnt/c/ai_models/lora", description="LoRA models path"
+    )
+    VAE_PATH: str = Field(default="/mnt/c/ai_models/vae", description="VAE models path")
+    OUTPUT_PATH: str = Field(
+        default="/mnt/data/training/runs/sd-multimodal-platform/outputs",
+        description="Generated outputs path",
+    )
 
     SD15_MODEL_PATH: Optional[str] = None
     PIXART_MODEL_PATH: Optional[str] = None
@@ -138,10 +153,11 @@ class Settings(BaseSettings):
 
     # === Post-processing Paths ===
     UPSCALE_MODELS_PATH: str = Field(
-        default="./models/upscale", description="Upscale models directory"
+        default="/mnt/c/ai_models/upscale", description="Upscale models directory"
     )
     FACE_RESTORE_MODELS_PATH: str = Field(
-        default="./models/face-restore", description="Face restoration models directory"
+        default="/mnt/c/ai_models/face-restore",
+        description="Face restoration models directory",
     )
 
     # Generation Defaults
@@ -185,8 +201,10 @@ class Settings(BaseSettings):
 
     # Security Limits
     MAX_STEPS: int = 100
+    MAX_CFG: float = 20.0
     MAX_RESOLUTION: int = 1024 * 1024  # 1MP
     MAX_IMAGE_SIZE: int = 10 * 1024 * 1024  # 10MB
+    MAX_UPLOAD_MB: int = 10
     MAX_VIDEO_DURATION: int = 300  # 5 minutes
 
     # === Celery Configuration ===
@@ -301,14 +319,20 @@ class Settings(BaseSettings):
         default=True, description="Enable API rate limiting"
     )
     # Observability
-    ENABLE_PROMETHEUS = False
-    ENABLE_REQUEST_ID = True
-    LOG_BODY_LIMIT_BYTES = 4096
+    ENABLE_REQUEST_ID: bool = Field(
+        default=True, description="Attach request IDs to logs/responses"
+    )
+    LOG_BODY_LIMIT_BYTES: int = Field(
+        default=4096, description="Max request body bytes to log"
+    )
 
     # === Logging and Monitoring ===
     LOG_LEVEL: str = Field(default="INFO", description="Logging level")
     LOG_FORMAT: str = "json"  # "json" or "text"
-    LOG_FILE_PATH: str = Field(default="logs/app.log", description="Log file path")
+    LOG_FILE_PATH: str = Field(
+        default="/mnt/data/training/runs/sd-multimodal-platform/logs/app.log",
+        description="Log file path",
+    )
     ENABLE_REQUEST_LOGGING: bool = Field(
         default=True, description="Enable request logging"
     )
@@ -329,7 +353,10 @@ class Settings(BaseSettings):
     HEALTH_CHECK_TIMEOUT: int = 30  # seconds
 
     # Storage Configuration
-    ASSETS_PATH: Path = Field(default=Path("./assets"), description="Assets directory")
+    ASSETS_PATH: Path = Field(
+        default=Path("/mnt/data/training/runs/sd-multimodal-platform/assets"),
+        description="Assets directory",
+    )
     ENABLE_METADATA_LOGGING: bool = Field(
         default=True, description="Enable metadata logging"
     )
@@ -340,7 +367,7 @@ class Settings(BaseSettings):
     # Model Download Settings
     HF_TOKEN: str = Field(default="")
     USE_AUTH_TOKEN: bool = Field(default=False)
-    CACHE_DIR: str = Field(default="./cache")
+    CACHE_DIR: str = Field(default="/mnt/c/ai_cache")
 
     # Phase 3 Specific Settings
     AUTO_MODEL_SWITCHING: bool = Field(default=True)
@@ -359,6 +386,38 @@ class Settings(BaseSettings):
     MAX_CONTROLNET_PROCESSORS: int = Field(default=2, ge=1, le=4)
     ENABLE_PROGRESSIVE_LOADING: bool = Field(default=True)
     ASSET_CACHE_SIZE_MB: int = Field(default=500, ge=100, le=2000)
+
+    @model_validator(mode="after")
+    def _derive_storage_paths(self) -> "Settings":
+        """Derive all storage paths from AI_*_ROOTs (single source of truth)."""
+        models_root = Path(str(self.AI_MODELS_ROOT)).expanduser()
+        cache_root = Path(str(self.AI_CACHE_ROOT)).expanduser()
+        output_root = Path(str(self.AI_OUTPUT_ROOT)).expanduser()
+
+        # Models and caches must live under /mnt/c per ~/Desktop/data_model_structure.md
+        self.MODELS_PATH = str(models_root)
+        self.CONTROLNET_PATH = str(models_root / "controlnet")
+        self.UPSCALE_MODELS_PATH = str(models_root / "upscale")
+        self.FACE_RESTORE_MODELS_PATH = str(models_root / "face-restore")
+
+        # Derived model subpaths
+        self.SD_MODEL_PATH = str(models_root / "stable-diffusion")
+        self.SDXL_MODEL_PATH = str(models_root / "stable-diffusion" / "sdxl")
+        self.LORA_PATH = str(models_root / "lora")
+        self.VAE_PATH = str(models_root / "vae")
+
+        # Outputs must live under /mnt/data
+        self.OUTPUT_PATH = str(output_root / "outputs")
+        self.ASSETS_PATH = Path(output_root / "assets")
+        self.LOG_FILE_PATH = str(output_root / "logs" / "app.log")
+
+        # Keep legacy path objects in sync
+        self.MODEL_BASE_PATH = models_root
+        self.CACHE_BASE_PATH = cache_root
+        self.CACHE_DIR = str(cache_root)
+        self.OUTPUT_BASE_PATH = Path(output_root / "outputs")
+
+        return self
 
     @field_validator("DEVICE", mode="before")
     @classmethod
@@ -630,8 +689,7 @@ class Settings(BaseSettings):
 
 # Create global settings instance
 settings = Settings()
-# Ensure directories are created at startup
-settings.ensure_directories()
+
 
 
 def get_settings() -> Settings:
@@ -706,8 +764,10 @@ def get_settings_for_environment(env: str = None) -> Settings:  # type: ignore
         return get_development_settings()
 
 
-def validate_settings(settings_obj: Settings) -> bool:
-    """Validate settings configuration"""
+def validate_settings(
+    settings_obj: Settings, *, create_dirs: bool = False, check_redis: bool = False
+) -> bool:
+    """Validate settings configuration (optionally creating directories/checking Redis)."""
     try:
         # Check required directories
         for path in [
@@ -715,12 +775,18 @@ def validate_settings(settings_obj: Settings) -> bool:
             settings_obj.OUTPUT_BASE_PATH,
             settings_obj.CACHE_BASE_PATH,
         ]:
-            if not path.exists():
+            if create_dirs and not path.exists():
                 path.mkdir(parents=True, exist_ok=True)
+            elif not path.exists():
+                print(f"Warning: expected directory does not exist: {path}")
 
-        # Check Redis connection
-        if settings_obj.get_redis_url():
-            import redis
+        # Check Redis connection (optional)
+        if check_redis and settings_obj.get_redis_url():
+            try:
+                import redis  # type: ignore
+            except Exception:
+                print("Warning: redis client not installed; skipping Redis validation")
+                return True
 
             client = redis.from_url(settings_obj.get_redis_url())
             client.ping()
@@ -741,9 +807,10 @@ def validate_settings(settings_obj: Settings) -> bool:
         return False
 
 
-# Initialize and validate settings on import
-if not validate_settings(settings):
-    print("Warning: Some settings validation checks failed")
+# Avoid side effects on import; validation can be run explicitly.
+if os.getenv("VALIDATE_SETTINGS_ON_IMPORT", "false").lower() == "true":
+    if not validate_settings(settings, create_dirs=True, check_redis=False):
+        print("Warning: Some settings validation checks failed")
 
 # Export commonly used settings
 __all__ = [

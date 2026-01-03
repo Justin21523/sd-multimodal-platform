@@ -7,16 +7,9 @@ import cv2
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, List, Tuple
+from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 import torch
 from PIL import Image
-
-
-# Try to import Real-ESRGAN
-from realesrgan import RealESRGANer
-from basicsr.archs.rrdbnet_arch import RRDBNet
-
-REALESRGAN_AVAILABLE = True
 
 
 from app.config import settings
@@ -31,10 +24,10 @@ try:
     from basicsr.archs.rrdbnet_arch import RRDBNet
 
     REALESRGAN_AVAILABLE = True
-except ImportError:
-    RealESRGANer = None
-    SRVGGNetCompact = None
-    RRDBNet = None
+except Exception:  # pragma: no cover
+    RealESRGANer = None  # type: ignore
+    SRVGGNetCompact = None  # type: ignore
+    RRDBNet = None  # type: ignore
     REALESRGAN_AVAILABLE = False
 
 
@@ -100,7 +93,13 @@ class RealESRGANWrapper:
             # 重新初始化 upsampler 以應用新的 tile 設置
             self.upsampler.tile = value  # type: ignore
 
-    def enhance(self, img, outscale=None):
+    def enhance(
+        self,
+        img,
+        outscale=None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        abort_check: Optional[Callable[[], None]] = None,
+    ):
         """
         增強圖像解析度
 
@@ -114,38 +113,73 @@ class RealESRGANWrapper:
         if outscale is None:
             outscale = self.scale
 
+        if abort_check is not None:
+            abort_check()
+
         # 如果需要分塊處理大圖像
         if self._tile_size > 0:
             # 手動實現分塊處理
-            enhanced_img = self._tile_enhance(img, outscale)
+            enhanced_img = self._tile_enhance(
+                img,
+                outscale,
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+            )
         else:
             # 直接處理整張圖像
+            if abort_check is not None:
+                abort_check()
             enhanced_img, _ = self.upsampler.enhance(img, outscale=outscale)  # type: ignore
+            if progress_callback is not None:
+                try:
+                    progress_callback(0, 1)
+                except Exception:
+                    pass
 
         return enhanced_img, None
 
-    def _tile_enhance(self, img, outscale):
+    def _tile_enhance(
+        self,
+        img,
+        outscale,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        abort_check: Optional[Callable[[], None]] = None,
+    ):
         """分塊處理大圖像"""
         h, w, c = img.shape
         tile_size = self._tile_size
         overlap = 32  # 重疊像素，避免接縫
 
+        if abort_check is not None:
+            abort_check()
+
         # 如果圖像小於 tile 大小，直接處理
         if h <= tile_size and w <= tile_size:
+            if abort_check is not None:
+                abort_check()
             enhanced_img, _ = self.upsampler.enhance(img, outscale=outscale)  # type: ignore
+            if progress_callback is not None:
+                try:
+                    progress_callback(0, 1)
+                except Exception:
+                    pass
             return enhanced_img
 
         # 計算需要的 tile 數量
         tiles_h = (h - 1) // (tile_size - overlap) + 1
         tiles_w = (w - 1) // (tile_size - overlap) + 1
+        total_tiles = max(1, int(tiles_h * tiles_w))
 
         # 創建輸出圖像
         enhanced_h = h * outscale
         enhanced_w = w * outscale
         enhanced_img = np.zeros((enhanced_h, enhanced_w, c), dtype=np.uint8)
 
+        tile_index = 0
         for i in range(tiles_h):
             for j in range(tiles_w):
+                if abort_check is not None:
+                    abort_check()
                 # 計算 tile 邊界
                 start_h = i * (tile_size - overlap)
                 end_h = min(start_h + tile_size, h)
@@ -168,6 +202,13 @@ class RealESRGANWrapper:
                 enhanced_img[out_start_h:out_end_h, out_start_w:out_end_w] = (
                     enhanced_tile
                 )
+
+                if progress_callback is not None:
+                    try:
+                        progress_callback(tile_index, total_tiles)
+                    except Exception:
+                        pass
+                tile_index += 1
 
         return enhanced_img
 
@@ -193,11 +234,13 @@ class UpscaleService:
         self.upsampler: Optional[RealESRGANer] = None  # type: ignore
         self.device = settings.DEVICE
 
+        weights_dir = Path(settings.UPSCALE_MODELS_PATH)
+
         # Available models
         self.available_models = {
             "RealESRGAN_x4plus": {
                 "model_name": "RealESRGAN_x4plus",
-                "model_path": "weights/RealESRGAN_x4plus.pth",
+                "model_path": str(weights_dir / "RealESRGAN_x4plus.pth"),
                 "scale": 4,
                 "netscale": 4,
                 "tile": 512,
@@ -207,7 +250,7 @@ class UpscaleService:
             },
             "RealESRGAN_x2plus": {
                 "model_name": "RealESRGAN_x2plus",
-                "model_path": "weights/RealESRGAN_x2plus.pth",
+                "model_path": str(weights_dir / "RealESRGAN_x2plus.pth"),
                 "scale": 2,
                 "netscale": 2,
                 "tile": 400,
@@ -217,7 +260,7 @@ class UpscaleService:
             },
             "RealESRGAN_x4plus_anime_6B": {
                 "model_name": "RealESRGAN_x4plus_anime_6B",
-                "model_path": "weights/RealESRGAN_x4plus_anime_6B.pth",
+                "model_path": str(weights_dir / "RealESRGAN_x4plus_anime_6B.pth"),
                 "scale": 4,
                 "netscale": 4,
                 "tile": 512,
@@ -227,7 +270,7 @@ class UpscaleService:
             },
             "RealESRNet_x4plus": {
                 "model_name": "RealESRNet_x4plus",
-                "model_path": "weights/RealESRNet_x4plus.pth",
+                "model_path": str(weights_dir / "RealESRNet_x4plus.pth"),
                 "scale": 4,
                 "netscale": 4,
                 "tile": 512,
@@ -257,6 +300,10 @@ class UpscaleService:
                 logger.warning(
                     "Real-ESRGAN not available, using fallback implementation"
                 )
+                if model_name in self.available_models:
+                    self.current_model = model_name
+                else:
+                    self.current_model = "RealESRGAN_x4plus"
                 self.is_initialized = True
                 return
 
@@ -277,11 +324,35 @@ class UpscaleService:
             logger.error(f"❌ Failed to initialize Upscale service: {e}")
             raise
 
+    def _resolve_weights_path(self, expected_path: Path) -> Path:
+        """Resolve model weights path, supporting legacy installer layouts."""
+        if expected_path.exists():
+            return expected_path
+
+        weights_dir = Path(settings.UPSCALE_MODELS_PATH)
+        legacy_candidates = [
+            weights_dir
+            / "real-esrgan"
+            / "experiments"
+            / "pretrained_models"
+            / expected_path.name,
+            weights_dir / "real-esrgan" / expected_path.name,
+        ]
+        for candidate in legacy_candidates:
+            if candidate.exists():
+                logger.info(f"Using legacy upscale weight path: {candidate}")
+                return candidate
+
+        raise FileNotFoundError(
+            f"Upscale model weights not found: {expected_path} (expected under {weights_dir}). "
+            "Run `python scripts/install_models.py --postprocess real-esrgan-x4` (and/or real-esrgan-x2, real-esrgan-anime) to install."
+        )
+
     async def _load_model(self, model_name: str):
         """Load specified Real-ESRGAN model"""
         try:
             config = self.available_models[model_name]
-            model_path = Path(config["model_path"])
+            model_path = self._resolve_weights_path(Path(config["model_path"]))
 
             # 使用包裝器而非直接使用 RealESRGANer
             self.upsampler = RealESRGANWrapper(
@@ -365,6 +436,8 @@ class UpscaleService:
         model_name: Optional[str] = None,
         tile_size: Optional[int] = None,
         user_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        abort_check: Optional[Callable[[], None]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -391,14 +464,24 @@ class UpscaleService:
             input_image, img_array = await self._process_input_image(image)
 
             # Determine model and scale
-            if model_name and model_name != self.current_model:
-                await self._load_model(model_name)
+            effective_model = model_name or self.current_model or "RealESRGAN_x4plus"
+            if effective_model not in self.available_models:
+                effective_model = "RealESRGAN_x4plus"
+
+            if REALESRGAN_AVAILABLE:
+                if effective_model != self.current_model:
+                    await self._load_model(effective_model)
+            else:
+                # Fallback mode: don't try to load weights, but keep metadata stable.
+                self.current_model = effective_model
+
+            config = self.available_models.get(self.current_model or effective_model) or self.available_models["RealESRGAN_x4plus"]
 
             if scale is None:
-                scale = self.available_models[self.current_model]["scale"]  # type: ignore
+                scale = config["scale"]  # type: ignore[index]
 
             # Validate scale
-            max_scale = self.available_models[self.current_model]["scale"]  # type: ignore
+            max_scale = config["scale"]  # type: ignore[index]
             if scale > max_scale:
                 logger.warning(
                     f"Requested scale {scale} > model max {max_scale}, using {max_scale}"
@@ -412,10 +495,18 @@ class UpscaleService:
             # Perform upscaling
             if settings.MOCK_GENERATION or not REALESRGAN_AVAILABLE:
                 # Mock upscaling for testing
+                if abort_check is not None:
+                    abort_check()
                 upscaled_array = await self._mock_upscale(img_array, scale)  # type: ignore
                 await asyncio.sleep(0.1)  # Simulate processing time
             else:
-                upscaled_array = await self._real_upscale(img_array, scale, tile_size)  # type: ignore
+                upscaled_array = await self._real_upscale(
+                    img_array,
+                    scale,
+                    tile_size,
+                    progress_callback=progress_callback,
+                    abort_check=abort_check,
+                )  # type: ignore
 
             # Convert back to PIL Image
             upscaled_image = Image.fromarray(upscaled_array)
@@ -427,7 +518,7 @@ class UpscaleService:
                 original_image=input_image,
                 upscaled_image=upscaled_image,
                 scale=scale,  # type: ignore
-                model_name=self.current_model,  # type: ignore
+                model_name=str(self.current_model or effective_model),
                 processing_time=processing_time,
                 user_id=user_id,
             )
@@ -498,7 +589,12 @@ class UpscaleService:
             raise
 
     async def _real_upscale(
-        self, img_array: np.ndarray, scale: int, tile_size: Optional[int] = None
+        self,
+        img_array: np.ndarray,
+        scale: int,
+        tile_size: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        abort_check: Optional[Callable[[], None]] = None,
     ) -> np.ndarray:
         """Perform real upscaling using Real-ESRGAN"""
         try:
@@ -511,7 +607,12 @@ class UpscaleService:
                 self.upsampler.tile = tile_size
 
             # 執行放大
-            upscaled_img, _ = self.upsampler.enhance(img_array, outscale=scale)
+            upscaled_img, _ = self.upsampler.enhance(
+                img_array,
+                outscale=scale,
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+            )
 
             # 恢復原始 tile 大小
             if tile_size:
