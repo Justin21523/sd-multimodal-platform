@@ -1683,16 +1683,35 @@ export default function App() {
           setBusy(false);
           return;
         }
+        let initAssetIdLocal = img2imgAssetId;
+        let controlAssetIdLocal = controlAssetId;
+        if (!initAssetIdLocal && initImageDataUrl && initImageDataUrl.startsWith("data:")) {
+          try {
+            initAssetIdLocal = await uploadDataUrlAsAssetId(initImageDataUrl, { category: "reference", filename: "init.png" });
+            setImg2imgAssetId(initAssetIdLocal);
+          } catch (e) {
+            console.warn("Failed to upload init image to assets; falling back to base64", e);
+          }
+        }
+        if (useControlNet && !controlAssetIdLocal && controlImageDataUrl && controlImageDataUrl.startsWith("data:")) {
+          try {
+            const category = controlAssetCategory || "reference";
+            controlAssetIdLocal = await uploadDataUrlAsAssetId(controlImageDataUrl, { category, filename: "control.png" });
+            setControlAssetId(controlAssetIdLocal);
+          } catch (e) {
+            console.warn("Failed to upload control image to assets; falling back to base64", e);
+          }
+        }
         const resp = await apiPost<Img2ImgResponse>("/api/v1/img2img/", {
           ...baseParams,
           user_id: queueUserFilter || "local",
-          ...(img2imgAssetId ? { init_asset_id: img2imgAssetId } : { init_image: initImageDataUrl }),
+          ...(initAssetIdLocal ? { init_asset_id: initAssetIdLocal } : { init_image: initImageDataUrl }),
           strength: clampFloat(strength, 0.75),
           ...(useControlNet
             ? {
                 controlnet: {
                   type: controlType,
-                  ...(controlAssetId ? { asset_id: controlAssetId } : { image: controlImageDataUrl }),
+                  ...(controlAssetIdLocal ? { asset_id: controlAssetIdLocal } : { image: controlImageDataUrl }),
                   preprocess: controlPreprocess,
                   strength: clampFloat(controlStrength, 1.0)
                 }
@@ -1715,9 +1734,9 @@ export default function App() {
           num_images: baseParams.num_images,
           strength: clampFloat(strength, 0.75),
           controlnet: useControlNet ? { type: controlType, strength: clampFloat(controlStrength, 1.0), preprocess: controlPreprocess } : null,
-          init_asset_id: img2imgAssetId || null,
+          init_asset_id: initAssetIdLocal || null,
           mask_asset_id: null,
-          control_asset_id: useControlNet ? (controlAssetId || null) : null
+          control_asset_id: useControlNet ? (controlAssetIdLocal || null) : null
         });
       } else {
         if (!initImageDataUrl && !img2imgAssetId) {
@@ -1731,11 +1750,30 @@ export default function App() {
           return;
         }
 
+        let initAssetIdLocal = img2imgAssetId;
+        let maskAssetIdLocal = maskAssetId;
+        if (!initAssetIdLocal && initImageDataUrl && initImageDataUrl.startsWith("data:")) {
+          try {
+            initAssetIdLocal = await uploadDataUrlAsAssetId(initImageDataUrl, { category: "reference", filename: "init.png" });
+            setImg2imgAssetId(initAssetIdLocal);
+          } catch (e) {
+            console.warn("Failed to upload init image to assets; falling back to base64", e);
+          }
+        }
+        if (!maskAssetIdLocal && maskImageDataUrl && maskImageDataUrl.startsWith("data:")) {
+          try {
+            maskAssetIdLocal = await uploadDataUrlAsAssetId(maskImageDataUrl, { category: "mask", filename: "mask.png" });
+            setMaskAssetId(maskAssetIdLocal);
+          } catch (e) {
+            console.warn("Failed to upload mask image to assets; falling back to base64", e);
+          }
+        }
+
         const resp = await apiPost<InpaintResponse>("/api/v1/img2img/inpaint", {
           ...baseParams,
           user_id: queueUserFilter || "local",
-          ...(img2imgAssetId ? { init_asset_id: img2imgAssetId } : { init_image: initImageDataUrl }),
-          ...(maskAssetId ? { mask_asset_id: maskAssetId } : { mask_image: maskImageDataUrl }),
+          ...(initAssetIdLocal ? { init_asset_id: initAssetIdLocal } : { init_image: initImageDataUrl }),
+          ...(maskAssetIdLocal ? { mask_asset_id: maskAssetIdLocal } : { mask_image: maskImageDataUrl }),
           strength: clampFloat(strength, 0.75),
           mask_blur: clampInt(maskBlur, 4),
           inpainting_fill: inpaintFill
@@ -1758,8 +1796,8 @@ export default function App() {
           mask_blur: clampInt(maskBlur, 4),
           inpainting_fill: inpaintFill,
           controlnet: null,
-          init_asset_id: img2imgAssetId || null,
-          mask_asset_id: maskAssetId || null,
+          init_asset_id: initAssetIdLocal || null,
+          mask_asset_id: maskAssetIdLocal || null,
           control_asset_id: null
         });
       }
