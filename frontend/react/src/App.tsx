@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiDelete, apiGet, apiPatch, apiPost, apiPostEmpty, apiPostForm, resolveMediaUrl, withQuery } from "./api/client";
 import { Card } from "./components/Card";
@@ -402,6 +402,9 @@ export default function App() {
   const [queueLoading, setQueueLoading] = useState(false);
   const queueTasksStreamRef = useRef<EventSource | null>(null);
   const [queueTasksStreamOk, setQueueTasksStreamOk] = useState(false);
+  const queueVisibleTaskIdsRef = useRef<Set<string>>(new Set());
+  const queueSelectedTaskIdRef = useRef<string | null>(null);
+  const queueRefreshTimerRef = useRef<number | null>(null);
 
   // Assets
   const [assetCategories, setAssetCategories] = useState<Record<string, number>>({});
@@ -575,6 +578,14 @@ export default function App() {
   }, [lastTaskId]);
 
   useEffect(() => {
+    queueVisibleTaskIdsRef.current = new Set(queueTasks?.tasks.map((t) => t.task_id) ?? []);
+  }, [queueTasks]);
+
+  useEffect(() => {
+    queueSelectedTaskIdRef.current = queueSelectedTask?.task_id ?? null;
+  }, [queueSelectedTask]);
+
+  useEffect(() => {
     if (runMode !== "async") {
       const existing = taskCenterUserStreamRef.current;
       if (existing) {
@@ -705,6 +716,10 @@ export default function App() {
         }
       }
       queueTasksStreamRef.current = null;
+      if (queueRefreshTimerRef.current !== null) {
+        clearTimeout(queueRefreshTimerRef.current);
+        queueRefreshTimerRef.current = null;
+      }
       setQueueTasksStreamOk(false);
       return;
     }
@@ -728,6 +743,16 @@ export default function App() {
         try {
           const parsed = JSON.parse(String(ev.data ?? "{}")) as QueueTaskStatus;
           if (!parsed || typeof parsed.task_id !== "string") return;
+
+          const selectedId = queueSelectedTaskIdRef.current;
+          const isVisible = queueVisibleTaskIdsRef.current.has(parsed.task_id);
+          const isSelected = !!selectedId && selectedId === parsed.task_id;
+          if (!isVisible && !isSelected && queueRefreshTimerRef.current === null) {
+            queueRefreshTimerRef.current = window.setTimeout(() => {
+              queueRefreshTimerRef.current = null;
+              refreshQueueOnce();
+            }, 300);
+          }
 
           setQueueTasks((prev) => {
             if (!prev) return prev;
@@ -783,6 +808,10 @@ export default function App() {
 
     return () => {
       cancelled = true;
+      if (queueRefreshTimerRef.current !== null) {
+        clearTimeout(queueRefreshTimerRef.current);
+        queueRefreshTimerRef.current = null;
+      }
       setQueueTasksStreamOk(false);
       if (es) {
         try {
@@ -793,7 +822,7 @@ export default function App() {
       }
       if (queueTasksStreamRef.current === es) queueTasksStreamRef.current = null;
     };
-  }, [tab, runMode, queueAutoRefresh]);
+  }, [tab, runMode, queueAutoRefresh, refreshQueueOnce]);
 
   useEffect(() => {
     const prev = inpaintPrevInitRef.current;
@@ -1898,7 +1927,7 @@ export default function App() {
     }
   }
 
-  async function refreshQueueOnce() {
+  const refreshQueueOnce = useCallback(async () => {
     setError("");
     setQueueLoading(true);
     try {
@@ -1918,7 +1947,7 @@ export default function App() {
     } finally {
       setQueueLoading(false);
     }
-  }
+  }, [queuePage, queuePageSize, queueStatusFilter, queueUserFilter]);
 
   async function cancelQueueTask(taskId: string, opts?: { force?: boolean }) {
     setError("");
