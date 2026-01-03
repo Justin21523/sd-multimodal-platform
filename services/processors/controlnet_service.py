@@ -395,10 +395,10 @@ class ControlNetManager:
                     f"ControlNet {controlnet_type} not loaded for variant={variant}"
                 )
             processor = self.processors[processor_key]
-            controlnet_params = generation_kwargs.get("controlnet_params", {}) or {}
+            controlnet_params = dict(generation_kwargs.get("controlnet_params", {}) or {})
             processed_control = processor.preprocess_image(
                 control_image,
-                preprocess=bool(controlnet_params.get("preprocess", True)),
+                preprocess=bool(controlnet_params.pop("preprocess", True)),
                 **controlnet_params,
             )
 
@@ -453,10 +453,7 @@ class ControlNetManager:
                 stride = max(1, int(callback_steps))
 
                 def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
-                    try:
-                        progress_callback(step, int(num_inference_steps))
-                    except Exception:
-                        pass
+                    progress_callback(step, int(num_inference_steps))
 
                 pipeline_params["callback"] = _cb
                 pipeline_params["callback_steps"] = stride

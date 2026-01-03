@@ -556,10 +556,7 @@ class ModelManager:
                 stride = max(1, int(callback_steps))
 
                 def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
-                    try:
-                        progress_callback(step, num_inference_steps)
-                    except Exception:
-                        pass
+                    progress_callback(step, num_inference_steps)
 
                 generation_params["callback"] = _cb
                 generation_params["callback_steps"] = stride
@@ -634,10 +631,7 @@ class ModelManager:
                 stride = max(1, int(callback_steps))
 
                 def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
-                    try:
-                        progress_callback(step, num_inference_steps)
-                    except Exception:
-                        pass
+                    progress_callback(step, num_inference_steps)
 
                 generation_params["callback"] = _cb
                 generation_params["callback_steps"] = stride
@@ -714,10 +708,7 @@ class ModelManager:
                 stride = max(1, int(callback_steps))
 
                 def _cb(step: int, timestep: int, latents):  # type: ignore[no-untyped-def]
-                    try:
-                        progress_callback(step, num_inference_steps)
-                    except Exception:
-                        pass
+                    progress_callback(step, num_inference_steps)
 
                 generation_params["callback"] = _cb
                 generation_params["callback_steps"] = stride
