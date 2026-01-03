@@ -626,29 +626,170 @@ async def stream_task_status(
     """
 
     async def event_generator():
+        loop = asyncio.get_running_loop()
         last_payload: Optional[str] = None
-        while True:
-            task_info = await queue_manager.get_task_status(task_id)
-            if not task_info:
-                yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
-                return
+        pubsub: Optional[Any] = None
+        channel: Optional[str] = None
 
-            payload = _convert_task_info_to_response(task_info).model_dump(mode="json")
-            encoded = json.dumps(payload, ensure_ascii=False)
-            if encoded != last_payload:
-                yield f"data: {encoded}\n\n"
-                last_payload = encoded
+        async def _pubsub_subscribe(pubsub: Any, channel: str) -> None:
+            subscribe = getattr(pubsub, "subscribe", None)
+            if subscribe is None:
+                raise RuntimeError("PubSub missing subscribe()")
+            result = subscribe(channel)
+            if asyncio.iscoroutine(result):
+                await result
 
-            if task_info.status in (
-                TaskStatus.COMPLETED,
-                TaskStatus.FAILED,
-                TaskStatus.CANCELLED,
-                TaskStatus.TIMEOUT,
-            ):
-                return
+        async def _pubsub_get_message(
+            pubsub: Any, timeout_seconds: float
+        ) -> Optional[Dict[str, Any]]:
+            get_message = getattr(pubsub, "get_message", None)
+            if get_message is None:
+                return None
+            try:
+                result = get_message(
+                    ignore_subscribe_messages=True, timeout=timeout_seconds
+                )
+            except TypeError:
+                result = get_message(ignore_subscribe_messages=True)
+            if asyncio.iscoroutine(result):
+                try:
+                    return await asyncio.wait_for(result, timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    return None
+            return result
 
-            # Keep the connection alive and reduce client polling.
-            await asyncio.sleep(1.0)
+        task_info = await queue_manager.get_task_status(task_id)
+        if not task_info:
+            yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
+            return
+
+        # Subscribe to user:{user_id}:events when possible; fallback to polling otherwise.
+        try:
+            if task_info.user_id:
+                task_store = getattr(queue_manager, "task_store", None)
+                redis_client = (
+                    getattr(task_store, "redis_client", None) if task_store else None
+                )
+                if redis_client is not None and hasattr(redis_client, "pubsub"):
+                    pubsub = redis_client.pubsub()
+                    prefix = getattr(task_store, "user_tasks_prefix", "user:")
+                    suffix = getattr(task_store, "user_events_suffix", ":events")
+                    channel = f"{prefix}{task_info.user_id}{suffix}"
+                    await _pubsub_subscribe(pubsub, channel)
+        except Exception:
+            pubsub = None
+            channel = None
+
+        payload = _convert_task_info_to_response(task_info).model_dump(mode="json")
+        encoded = json.dumps(payload, ensure_ascii=False)
+        yield f"data: {encoded}\n\n"
+        last_payload = encoded
+
+        resync_interval_seconds = 15.0
+        keep_alive_interval_seconds = 10.0
+        last_resync_at = loop.time()
+        last_keep_alive_at = last_resync_at
+
+        try:
+            while True:
+                if task_info.status in (
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                    TaskStatus.TIMEOUT,
+                ):
+                    return
+
+                if pubsub is None:
+                    await asyncio.sleep(1.0)
+                    task_info = await queue_manager.get_task_status(task_id)
+                    if not task_info:
+                        yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
+                        return
+
+                    payload = _convert_task_info_to_response(task_info).model_dump(
+                        mode="json"
+                    )
+                    encoded = json.dumps(payload, ensure_ascii=False)
+                    if encoded != last_payload:
+                        yield f"data: {encoded}\n\n"
+                        last_payload = encoded
+                    continue
+
+                message: Optional[Dict[str, Any]] = None
+                try:
+                    message = await _pubsub_get_message(pubsub, timeout_seconds=1.0)
+                except Exception:
+                    try:
+                        close = getattr(pubsub, "close", None)
+                        if close is not None:
+                            result = close()
+                            if asyncio.iscoroutine(result):
+                                await result
+                    except Exception:
+                        pass
+                    pubsub = None
+                    channel = None
+                    continue
+
+                if message and message.get("type") == "message":
+                    data = message.get("data")
+                    if isinstance(data, str):
+                        try:
+                            parsed = json.loads(data)
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict) and parsed.get("task_id") == task_id:
+                            task_info = await queue_manager.get_task_status(task_id)
+                            if not task_info:
+                                yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
+                                return
+                            payload = _convert_task_info_to_response(task_info).model_dump(
+                                mode="json"
+                            )
+                            encoded = json.dumps(payload, ensure_ascii=False)
+                            if encoded != last_payload:
+                                yield f"data: {encoded}\n\n"
+                                last_payload = encoded
+
+                now = loop.time()
+                if now - last_resync_at >= resync_interval_seconds:
+                    task_info = await queue_manager.get_task_status(task_id)
+                    if not task_info:
+                        yield f"event: error\ndata: {json.dumps({'error': 'task_not_found', 'task_id': task_id})}\n\n"
+                        return
+                    payload = _convert_task_info_to_response(task_info).model_dump(
+                        mode="json"
+                    )
+                    encoded = json.dumps(payload, ensure_ascii=False)
+                    if encoded != last_payload:
+                        yield f"data: {encoded}\n\n"
+                        last_payload = encoded
+                    last_resync_at = now
+
+                if now - last_keep_alive_at >= keep_alive_interval_seconds:
+                    yield ": keep-alive\n\n"
+                    last_keep_alive_at = now
+
+        except asyncio.CancelledError:
+            return
+        finally:
+            if pubsub is not None:
+                try:
+                    if channel and hasattr(pubsub, "unsubscribe"):
+                        result = pubsub.unsubscribe(channel)
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception:
+                    pass
+                try:
+                    close = getattr(pubsub, "close", None)
+                    if close is not None:
+                        result = close()
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception:
+                    pass
 
     return StreamingResponse(
         event_generator(),
