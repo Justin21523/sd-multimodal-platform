@@ -54,6 +54,14 @@ data/images/output/
 data/images/temp/
 data/logs/
 *.log
+htmlcov/
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Local run artifacts (do not commit)
+metadata/
+outputs/
 
 # OS
 .DS_Store

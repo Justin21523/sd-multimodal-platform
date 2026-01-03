@@ -1,0 +1,14 @@
+[run]
+# Keep coverage meaningful for unit tests in this repo:
+# - Omit heavyweight/optional modules that require external services (Redis/Celery)
+#   or local model installs (diffusers pipelines), which are not exercised in CI.
+omit =
+    app/workers/*
+    app/dependencies.py
+    app/schemas/caption.py
+    app/schemas/vqa.py
+    app/api/v1/assets.py
+    app/api/v1/queue.py
+    app/api/v1/txt2img.py
+    app/api/v1/img2img.py
+
