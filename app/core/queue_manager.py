@@ -134,7 +134,24 @@ class RedisTaskStore:
         self.user_tasks_prefix = "user:"
         self.task_events_suffix = ":events"
         self.user_events_suffix = ":events"
+        self.queue_events_channel = "queue:events"
         self.stats_key = "queue:stats"
+
+    async def _publish_queue_event(self, task_info: TaskInfo) -> None:
+        """
+        Best-effort publish of a task update for global SSE subscribers.
+
+        Channel: queue:events
+        Payload: {"task_id": "..."}
+        """
+        client = self.redis_client
+        if client is None or not hasattr(client, "publish"):
+            return
+        try:
+            payload = json.dumps({"task_id": task_info.task_id}, ensure_ascii=False)
+            await client.publish(self.queue_events_channel, payload)  # type: ignore[attr-defined]
+        except Exception:
+            return
 
     async def _publish_task_event(self, task_info: TaskInfo) -> None:
         """
@@ -231,6 +248,7 @@ class RedisTaskStore:
                 pipe.expire(user_key, 86400 * 7)
 
             await pipe.execute()
+            await self._publish_queue_event(task_info)
             await self._publish_task_event(task_info)
             await self._publish_user_task_event(task_info)
             logger.debug(f"Task {task_info.task_id} stored successfully")

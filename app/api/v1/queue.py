@@ -615,6 +615,163 @@ async def stream_user_tasks(
     )
 
 
+@router.get("/stream/tasks")
+async def stream_queue_tasks(
+    queue_manager: QueueManager = Depends(_queue_manager_dep),
+):
+    """
+    Server-Sent Events stream for global task updates.
+
+    Each event `data` payload matches `/queue/status/{task_id}` (TaskStatusResponse).
+    Clients should still fetch initial queue pages via REST and use this stream
+    for incremental updates.
+    """
+
+    async def event_generator():
+        terminal_statuses = {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.TIMEOUT,
+        }
+        last_payload_by_id: Dict[str, str] = {}
+        loop = asyncio.get_running_loop()
+
+        async def _pubsub_subscribe(pubsub: Any, channel: str) -> None:
+            subscribe = getattr(pubsub, "subscribe", None)
+            if subscribe is None:
+                raise RuntimeError("PubSub missing subscribe()")
+            result = subscribe(channel)
+            if asyncio.iscoroutine(result):
+                await result
+
+        async def _pubsub_get_message(
+            pubsub: Any, timeout_seconds: float
+        ) -> Optional[Dict[str, Any]]:
+            get_message = getattr(pubsub, "get_message", None)
+            if get_message is None:
+                return None
+            try:
+                result = get_message(
+                    ignore_subscribe_messages=True, timeout=timeout_seconds
+                )
+            except TypeError:
+                result = get_message(ignore_subscribe_messages=True)
+            if asyncio.iscoroutine(result):
+                try:
+                    return await asyncio.wait_for(result, timeout=timeout_seconds)
+                except asyncio.TimeoutError:
+                    return None
+            return result
+
+        pubsub: Optional[Any] = None
+        channel: str = "queue:events"
+
+        try:
+            task_store = getattr(queue_manager, "task_store", None)
+            redis_client = getattr(task_store, "redis_client", None) if task_store else None
+            channel = getattr(task_store, "queue_events_channel", channel)
+            if redis_client is not None and hasattr(redis_client, "pubsub"):
+                pubsub = redis_client.pubsub()
+                await _pubsub_subscribe(pubsub, channel)
+        except Exception:
+            pubsub = None
+
+        keep_alive_interval_seconds = 10.0
+        last_keep_alive_at = loop.time()
+
+        # Send an immediate comment so clients know the connection is alive.
+        yield ": keep-alive\n\n"
+
+        try:
+            while True:
+                if pubsub is None:
+                    await asyncio.sleep(1.0)
+                    now = loop.time()
+                    if now - last_keep_alive_at >= keep_alive_interval_seconds:
+                        yield ": keep-alive\n\n"
+                        last_keep_alive_at = now
+                    continue
+
+                message: Optional[Dict[str, Any]] = None
+                try:
+                    message = await _pubsub_get_message(pubsub, timeout_seconds=1.0)
+                except Exception:
+                    try:
+                        close = getattr(pubsub, "close", None)
+                        if close is not None:
+                            result = close()
+                            if asyncio.iscoroutine(result):
+                                await result
+                    except Exception:
+                        pass
+                    pubsub = None
+                    continue
+
+                if message and message.get("type") == "message":
+                    data = message.get("data")
+                    if isinstance(data, str):
+                        try:
+                            parsed = json.loads(data)
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            task_id = parsed.get("task_id")
+                            if isinstance(task_id, str) and task_id:
+                                try:
+                                    task_info = await queue_manager.get_task_status(task_id)
+                                except Exception:
+                                    task_info = None
+                                if task_info is None:
+                                    last_payload_by_id.pop(task_id, None)
+                                else:
+                                    payload = _convert_task_info_to_response(task_info).model_dump(
+                                        mode="json"
+                                    )
+                                    encoded = json.dumps(payload, ensure_ascii=False)
+                                    if last_payload_by_id.get(task_id) != encoded:
+                                        yield f"data: {encoded}\n\n"
+                                    if task_info.status in terminal_statuses:
+                                        last_payload_by_id.pop(task_id, None)
+                                    else:
+                                        last_payload_by_id[task_id] = encoded
+
+                                # Safety cap for long-lived streams.
+                                if len(last_payload_by_id) > 2000:
+                                    last_payload_by_id.clear()
+
+                now = loop.time()
+                if now - last_keep_alive_at >= keep_alive_interval_seconds:
+                    yield ": keep-alive\n\n"
+                    last_keep_alive_at = now
+
+        except asyncio.CancelledError:
+            return
+        finally:
+            if pubsub is not None:
+                try:
+                    if channel and hasattr(pubsub, "unsubscribe"):
+                        result = pubsub.unsubscribe(channel)
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception:
+                    pass
+                try:
+                    close = getattr(pubsub, "close", None)
+                    if close is not None:
+                        result = close()
+                        if asyncio.iscoroutine(result):
+                            await result
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 @router.get("/stream/{task_id}")
 async def stream_task_status(
     task_id: str, queue_manager: QueueManager = Depends(_queue_manager_dep)
