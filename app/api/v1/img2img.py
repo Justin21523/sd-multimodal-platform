@@ -9,11 +9,13 @@ import logging
 import time
 import asyncio
 import base64
+from pathlib import Path
 from io import BytesIO
 from PIL import Image
 
 from app.schemas.requests import Img2ImgRequest, InpaintRequest
 from app.schemas.responses import GenerationResponse
+from services.assets.asset_manager import get_asset_manager
 from services.models.sd_models import get_model_manager
 from services.processors.controlnet_service import get_controlnet_manager
 from services.history import get_history_store
@@ -30,6 +32,46 @@ from app.config import settings
 
 router = APIRouter(prefix="/img2img", tags=["Image-to-Image Generation"])
 logger = logging.getLogger(__name__)
+
+def _pil_image_from_file(path: Path) -> Image.Image:
+    try:
+        with Image.open(path) as img:
+            image = img.copy()
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGB")
+        return image
+    except Exception as e:
+        raise ValueError(f"Failed to load image file: {e}")
+
+
+async def _load_asset_image(asset_id: str) -> Image.Image:
+    asset_manager = get_asset_manager()
+    asset = await asset_manager.get_asset(asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    file_path = asset.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        raise HTTPException(status_code=404, detail="Asset missing file_path")
+
+    resolved = Path(file_path).expanduser().resolve()
+    assets_root = Path(settings.ASSETS_PATH).expanduser().resolve()
+    try:
+        if not resolved.is_relative_to(assets_root):
+            raise HTTPException(
+                status_code=422,
+                detail="asset_id must resolve under ASSETS_PATH (security restriction)",
+            )
+    except AttributeError:  # pragma: no cover (py<3.9)
+        if not str(resolved).startswith(str(assets_root) + "/"):
+            raise HTTPException(
+                status_code=422,
+                detail="asset_id must resolve under ASSETS_PATH (security restriction)",
+            )
+
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="Asset file not found on disk")
+
+    return _pil_image_from_file(resolved)
 
 
 @router.post("/", response_model=GenerationResponse)
@@ -64,7 +106,13 @@ async def generate_img2img(
 
         # Validate and prepare source image
         try:
-            init_image = base64_to_pil_image(request.init_image)
+            if request.init_image is not None:
+                init_image = base64_to_pil_image(request.init_image)
+            elif request.init_asset_id is not None:
+                init_image = await _load_asset_image(request.init_asset_id)
+            else:
+                assert request.image_path is not None
+                init_image = _pil_image_from_file(Path(request.image_path))
             init_image = prepare_img2img_image(
                 init_image, target_width=request.width, target_height=request.height
             )
@@ -101,7 +149,13 @@ async def generate_img2img(
             controlnet_manager = get_controlnet_manager()
 
             # Prepare control image
-            control_image = base64_to_pil_image(request.controlnet.image)
+            if request.controlnet.image is not None:
+                control_image = base64_to_pil_image(request.controlnet.image)
+            elif request.controlnet.asset_id is not None:
+                control_image = await _load_asset_image(request.controlnet.asset_id)
+            else:
+                assert request.controlnet.image_path is not None
+                control_image = _pil_image_from_file(Path(request.controlnet.image_path))
             control_image = prepare_img2img_image(
                 control_image, target_width=init_image.width, target_height=init_image.height
             )
@@ -320,8 +374,21 @@ async def generate_inpaint(
 
         # Validate and prepare images
         try:
-            init_image = base64_to_pil_image(request.init_image)
-            mask_image = base64_to_pil_image(request.mask_image)
+            if request.init_image is not None:
+                init_image = base64_to_pil_image(request.init_image)
+            elif request.init_asset_id is not None:
+                init_image = await _load_asset_image(request.init_asset_id)
+            else:
+                assert request.image_path is not None
+                init_image = _pil_image_from_file(Path(request.image_path))
+
+            if request.mask_image is not None:
+                mask_image = base64_to_pil_image(request.mask_image)
+            elif request.mask_asset_id is not None:
+                mask_image = await _load_asset_image(request.mask_asset_id)
+            else:
+                assert request.mask_path is not None
+                mask_image = _pil_image_from_file(Path(request.mask_path))
 
             # Prepare inpaint inputs
             init_image, mask_image = prepare_inpaint_mask(

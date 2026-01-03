@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, List, Literal
 
 import base64
 import re
+import uuid
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from app.config import settings
@@ -20,7 +21,16 @@ class ControlNetConfig(BaseModel):
     type: Literal["canny", "depth", "openpose", "scribble", "mlsd", "normal"] = Field(
         ..., description="ControlNet processor type"
     )
-    image: str = Field(..., description="Base64 encoded condition image")
+    image: Optional[str] = Field(
+        default=None, description="Base64 encoded condition image (legacy)"
+    )
+    asset_id: Optional[str] = Field(
+        default=None, description="Asset ID for condition image (preferred)"
+    )
+    image_path: Optional[str] = Field(
+        default=None,
+        description="Path to condition image (restricted to ASSETS_PATH/OUTPUT_PATH)",
+    )
     preprocess: bool = Field(
         default=True,
         description="Whether to auto-preprocess the control image (requires controlnet-aux/annotators).",
@@ -33,8 +43,10 @@ class ControlNetConfig(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def validate_base64_image(cls, v: str) -> str:
+    def validate_base64_image(cls, v: Optional[str]) -> Optional[str]:
         """Validate base64 image format and size"""
+        if v is None:
+            return None
         try:
             # Remove data URL prefix if present
             if v.startswith("data:image"):
@@ -48,6 +60,39 @@ class ControlNetConfig(BaseModel):
             return v
         except Exception as e:
             raise ValueError(f"Invalid base64 image: {str(e)}")
+
+    @field_validator("asset_id")
+    @classmethod
+    def validate_asset_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            uuid.UUID(str(v))
+        except Exception as e:
+            raise ValueError(f"Invalid asset_id (expected UUID): {e}")
+        return str(v)
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        from app.schemas.queue_requests import _resolve_allowed_image_path
+
+        return _resolve_allowed_image_path(v)
+
+    @model_validator(mode="after")
+    def validate_image_source(self) -> "ControlNetConfig":
+        provided = [
+            self.image is not None,
+            self.asset_id is not None,
+            self.image_path is not None,
+        ]
+        if sum(provided) != 1:
+            raise ValueError(
+                "ControlNet requires exactly one of: image (base64), asset_id, image_path"
+            )
+        return self
 
 
 class GenerationParams(BaseModel):
@@ -146,10 +191,17 @@ class Img2ImgRequest(BaseModel):
     negative_prompt: str = Field(default="", max_length=2000)
     user_id: Optional[str] = Field(default=None, description="User ID (optional)")
 
-    init_image: str = Field(
-        ...,
-        description="Base64 encoded source image",
+    init_image: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded source image (legacy)",
         validation_alias=AliasChoices("init_image", "image"),
+    )
+    init_asset_id: Optional[str] = Field(
+        default=None, description="Asset ID for source image (preferred)"
+    )
+    image_path: Optional[str] = Field(
+        default=None,
+        description="Path to source image (restricted to ASSETS_PATH/OUTPUT_PATH)",
     )
     strength: float = Field(default=0.75, ge=0.0, le=1.0)
     model_id: Optional[str] = Field(default=None)
@@ -176,8 +228,43 @@ class Img2ImgRequest(BaseModel):
 
     @field_validator("init_image")
     @classmethod
-    def validate_init_image(cls, v: str) -> str:
+    def validate_init_image(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
         return ControlNetConfig.validate_base64_image(v)
+
+    @field_validator("init_asset_id")
+    @classmethod
+    def validate_init_asset_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            uuid.UUID(str(v))
+        except Exception as e:
+            raise ValueError(f"Invalid init_asset_id (expected UUID): {e}")
+        return str(v)
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        from app.schemas.queue_requests import _resolve_allowed_image_path
+
+        return _resolve_allowed_image_path(v)
+
+    @model_validator(mode="after")
+    def validate_init_source(self) -> "Img2ImgRequest":
+        provided = [
+            self.init_image is not None,
+            self.init_asset_id is not None,
+            self.image_path is not None,
+        ]
+        if sum(provided) != 1:
+            raise ValueError(
+                "img2img requires exactly one of: init_image (base64), init_asset_id, image_path"
+            )
+        return self
 
     @field_validator("width", "height", mode="before")
     @classmethod
@@ -250,9 +337,24 @@ class InpaintRequest(BaseModel):
     user_id: Optional[str] = Field(default=None, description="User ID (optional)")
 
     # Required images
-    init_image: str = Field(..., description="Base64 encoded source image")
-    mask_image: str = Field(
-        ..., description="Base64 encoded mask (white=inpaint, black=keep)"
+    init_image: Optional[str] = Field(
+        default=None, description="Base64 encoded source image (legacy)"
+    )
+    mask_image: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded mask (white=inpaint, black=keep) (legacy)",
+    )
+    init_asset_id: Optional[str] = Field(
+        default=None, description="Asset ID for init image (preferred)"
+    )
+    mask_asset_id: Optional[str] = Field(
+        default=None, description="Asset ID for mask image (preferred)"
+    )
+    image_path: Optional[str] = Field(
+        default=None, description="Path to init image (restricted to ASSETS_PATH/OUTPUT_PATH)"
+    )
+    mask_path: Optional[str] = Field(
+        default=None, description="Path to mask image (restricted to ASSETS_PATH/OUTPUT_PATH)"
     )
 
     # Inpainting specific
@@ -269,6 +371,56 @@ class InpaintRequest(BaseModel):
     num_inference_steps: int = Field(default=25, ge=10, le=100)
     guidance_scale: float = Field(default=7.5, ge=1.0, le=20.0)
     seed: Optional[int] = Field(default=None)
+
+    @field_validator("init_image", "mask_image")
+    @classmethod
+    def validate_base64_images(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return ControlNetConfig.validate_base64_image(v)
+
+    @field_validator("init_asset_id", "mask_asset_id")
+    @classmethod
+    def validate_asset_ids(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            uuid.UUID(str(v))
+        except Exception as e:
+            raise ValueError(f"Invalid asset_id (expected UUID): {e}")
+        return str(v)
+
+    @field_validator("image_path", "mask_path")
+    @classmethod
+    def validate_paths(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        from app.schemas.queue_requests import _resolve_allowed_image_path
+
+        return _resolve_allowed_image_path(v)
+
+    @model_validator(mode="after")
+    def validate_sources(self) -> "InpaintRequest":
+        init_sources = [
+            self.init_image is not None,
+            self.init_asset_id is not None,
+            self.image_path is not None,
+        ]
+        if sum(init_sources) != 1:
+            raise ValueError(
+                "inpaint requires exactly one of: init_image (base64), init_asset_id, image_path"
+            )
+
+        mask_sources = [
+            self.mask_image is not None,
+            self.mask_asset_id is not None,
+            self.mask_path is not None,
+        ]
+        if sum(mask_sources) != 1:
+            raise ValueError(
+                "inpaint requires exactly one of: mask_image (base64), mask_asset_id, mask_path"
+            )
+        return self
 
 
 class AssetUploadRequest(BaseModel):
