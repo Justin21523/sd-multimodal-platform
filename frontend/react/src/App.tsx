@@ -1424,12 +1424,12 @@ export default function App() {
                 }
               : baseParams;
 
-        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
-          task_type: taskType,
-          parameters,
-          priority: "normal",
-          user_id: "local"
-        });
+	        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
+	          task_type: taskType,
+	          parameters,
+	          priority: "normal",
+	          user_id: queueUserFilter || "local"
+	        });
         if (!resp.success || !resp.task_id) {
           setBusy(false);
           setError(resp.message || "佇列提交失敗");
@@ -1599,12 +1599,12 @@ export default function App() {
                 }
               : baseParams;
 
-        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
-          task_type: taskType,
-          parameters,
-          priority: "normal",
-          user_id: "local"
-        });
+	        const resp = await apiPost<QueueEnqueueResponse>("/api/v1/queue/enqueue", {
+	          task_type: taskType,
+	          parameters,
+	          priority: "normal",
+	          user_id: queueUserFilter || "local"
+	        });
         if (!resp.success || !resp.task_id) {
           setBusy(false);
           setError(resp.message || "佇列提交失敗");
