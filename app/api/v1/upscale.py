@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.config import settings
+from app.schemas.requests import ControlNetConfig
+from services.assets.asset_manager import get_asset_manager
 from services.postprocess.upscale_service import get_upscale_service
 from services.history import get_history_store
 from utils.image_utils import base64_to_pil_image
@@ -23,11 +27,60 @@ router = APIRouter(prefix="/upscale", tags=["Upscale"])
 
 
 class UpscaleRequest(BaseModel):
-    image: str = Field(..., description="Base64 image (data URL or raw base64)")
+    image: Optional[str] = Field(
+        default=None, description="Base64 image (data URL or raw base64) (legacy)"
+    )
+    image_asset_id: Optional[str] = Field(
+        default=None, description="Asset ID for input image (preferred)"
+    )
+    image_path: Optional[str] = Field(
+        default=None,
+        description="Path to input image (restricted to ASSETS_PATH/OUTPUT_PATH)",
+    )
     scale: int = Field(default=4, ge=1, le=8)
     model: str = Field(default="RealESRGAN_x4plus")
     tile_size: Optional[int] = Field(default=None, ge=0, le=2048)
     user_id: Optional[str] = Field(default=None)
+
+    @field_validator("image")
+    @classmethod
+    def validate_image_base64(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return ControlNetConfig.validate_base64_image(v)
+
+    @field_validator("image_asset_id")
+    @classmethod
+    def validate_image_asset_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            uuid.UUID(str(v))
+        except Exception as e:
+            raise ValueError(f"Invalid image_asset_id (expected UUID): {e}")
+        return str(v)
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        from app.schemas.queue_requests import _resolve_allowed_image_path
+
+        return _resolve_allowed_image_path(v)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "UpscaleRequest":
+        provided = [
+            self.image is not None,
+            self.image_asset_id is not None,
+            self.image_path is not None,
+        ]
+        if sum(provided) != 1:
+            raise ValueError(
+                "upscale requires exactly one of: image (base64), image_asset_id, image_path"
+            )
+        return self
 
 
 @router.post("/")
@@ -38,10 +91,40 @@ async def upscale_image(payload: UpscaleRequest, http_request: Request) -> Dict[
 
     try:
         service = await get_upscale_service()
-        image = base64_to_pil_image(payload.image)
+        image_input: Any
+        if payload.image is not None:
+            image_input = base64_to_pil_image(payload.image)
+        elif payload.image_asset_id is not None:
+            asset_manager = get_asset_manager()
+            asset = await asset_manager.get_asset(payload.image_asset_id)
+            if not asset:
+                raise HTTPException(status_code=404, detail="Asset not found")
+            file_path = asset.get("file_path")
+            if not isinstance(file_path, str) or not file_path:
+                raise HTTPException(status_code=404, detail="Asset missing file_path")
+            resolved = Path(file_path).expanduser().resolve()
+            assets_root = Path(settings.ASSETS_PATH).expanduser().resolve()
+            try:
+                if not resolved.is_relative_to(assets_root):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="image_asset_id must resolve under ASSETS_PATH (security restriction)",
+                    )
+            except AttributeError:  # pragma: no cover (py<3.9)
+                if not str(resolved).startswith(str(assets_root) + "/"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="image_asset_id must resolve under ASSETS_PATH (security restriction)",
+                    )
+            if not resolved.exists() or not resolved.is_file():
+                raise HTTPException(status_code=404, detail="Asset file not found on disk")
+            image_input = resolved
+        else:
+            assert payload.image_path is not None
+            image_input = Path(payload.image_path)
 
         result = await service.upscale_image(
-            image=image,
+            image=image_input,
             scale=payload.scale,
             model_name=payload.model,
             tile_size=payload.tile_size,

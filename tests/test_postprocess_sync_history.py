@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
 
 from utils.image_utils import create_test_image, pil_image_to_base64
+from services.assets.asset_manager import AssetManager
 
 
 @pytest.mark.integration
@@ -40,3 +43,61 @@ async def test_sync_upscale_and_face_restore_write_history(client, mock_settings
     ids = [r.get("task_id") for r in hist_fr.json()["data"]["records"]]
     assert fr_body["data"]["task_id"] in ids
 
+
+@pytest.mark.integration
+async def test_sync_postprocess_accepts_image_asset_id(client, mock_settings):
+    # Reset singleton so it picks up patched settings.ASSETS_PATH for this test.
+    AssetManager._instance = None
+    AssetManager._initialized = False
+    try:
+        img = create_test_image(64, 64, "RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        payload = buf.getvalue()
+
+        upload = await client.post(
+            "/api/v1/assets/upload",
+            data={"category": "reference", "tags": "", "descriptions": ""},
+            files=[("files", ("input.png", payload, "image/png"))],
+        )
+        assert upload.status_code == 200
+        upload_body = upload.json()
+        assert upload_body["success"] is True
+        asset_id = upload_body["data"]["uploaded_assets"][0]["asset_id"]
+        assert isinstance(asset_id, str) and asset_id
+
+        up = await client.post(
+            "/api/v1/upscale/",
+            json={"image_asset_id": asset_id, "scale": 2, "model": "RealESRGAN_x4plus", "user_id": "user_a"},
+        )
+        assert up.status_code == 200
+        up_body = up.json()
+        assert up_body["success"] is True
+        assert isinstance(up_body.get("data", {}).get("task_id"), str)
+
+        fr = await client.post(
+            "/api/v1/face_restore/",
+            json={"image_asset_id": asset_id, "model": "GFPGAN_v1.4", "upscale": 2, "user_id": "user_a"},
+        )
+        assert fr.status_code == 200
+        fr_body = fr.json()
+        assert fr_body["success"] is True
+        assert isinstance(fr_body.get("data", {}).get("task_id"), str)
+    finally:
+        AssetManager._instance = None
+        AssetManager._initialized = False
+
+
+@pytest.mark.integration
+async def test_sync_postprocess_status_endpoints(client, mock_settings):
+    up = await client.get("/api/v1/upscale/status")
+    assert up.status_code == 200
+    up_body = up.json()
+    assert up_body["success"] is True
+    assert isinstance(up_body.get("data"), dict)
+
+    fr = await client.get("/api/v1/face_restore/status")
+    assert fr.status_code == 200
+    fr_body = fr.json()
+    assert fr_body["success"] is True
+    assert isinstance(fr_body.get("data"), dict)

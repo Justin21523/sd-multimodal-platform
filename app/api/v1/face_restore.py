@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.config import settings
+from app.schemas.requests import ControlNetConfig
+from services.assets.asset_manager import get_asset_manager
 from services.postprocess.face_restore_service import get_face_restore_service
 from services.history import get_history_store
 from utils.image_utils import base64_to_pil_image
@@ -23,7 +27,16 @@ router = APIRouter(prefix="/face_restore", tags=["Face Restore"])
 
 
 class FaceRestoreRequest(BaseModel):
-    image: str = Field(..., description="Base64 image (data URL or raw base64)")
+    image: Optional[str] = Field(
+        default=None, description="Base64 image (data URL or raw base64) (legacy)"
+    )
+    image_asset_id: Optional[str] = Field(
+        default=None, description="Asset ID for input image (preferred)"
+    )
+    image_path: Optional[str] = Field(
+        default=None,
+        description="Path to input image (restricted to ASSETS_PATH/OUTPUT_PATH)",
+    )
     model: str = Field(default="GFPGAN_v1.4")
     upscale: int = Field(default=2, ge=1, le=8)
     only_center_face: bool = Field(default=False)
@@ -31,6 +44,46 @@ class FaceRestoreRequest(BaseModel):
     paste_back: bool = Field(default=True)
     weight: float = Field(default=0.5, ge=0.0, le=1.0)
     user_id: Optional[str] = Field(default=None)
+
+    @field_validator("image")
+    @classmethod
+    def validate_image_base64(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return ControlNetConfig.validate_base64_image(v)
+
+    @field_validator("image_asset_id")
+    @classmethod
+    def validate_image_asset_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            uuid.UUID(str(v))
+        except Exception as e:
+            raise ValueError(f"Invalid image_asset_id (expected UUID): {e}")
+        return str(v)
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        from app.schemas.queue_requests import _resolve_allowed_image_path
+
+        return _resolve_allowed_image_path(v)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "FaceRestoreRequest":
+        provided = [
+            self.image is not None,
+            self.image_asset_id is not None,
+            self.image_path is not None,
+        ]
+        if sum(provided) != 1:
+            raise ValueError(
+                "face_restore requires exactly one of: image (base64), image_asset_id, image_path"
+            )
+        return self
 
 
 @router.post("/")
@@ -41,10 +94,40 @@ async def restore_faces(payload: FaceRestoreRequest, http_request: Request) -> D
 
     try:
         service = await get_face_restore_service()
-        image = base64_to_pil_image(payload.image)
+        image_input: Any
+        if payload.image is not None:
+            image_input = base64_to_pil_image(payload.image)
+        elif payload.image_asset_id is not None:
+            asset_manager = get_asset_manager()
+            asset = await asset_manager.get_asset(payload.image_asset_id)
+            if not asset:
+                raise HTTPException(status_code=404, detail="Asset not found")
+            file_path = asset.get("file_path")
+            if not isinstance(file_path, str) or not file_path:
+                raise HTTPException(status_code=404, detail="Asset missing file_path")
+            resolved = Path(file_path).expanduser().resolve()
+            assets_root = Path(settings.ASSETS_PATH).expanduser().resolve()
+            try:
+                if not resolved.is_relative_to(assets_root):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="image_asset_id must resolve under ASSETS_PATH (security restriction)",
+                    )
+            except AttributeError:  # pragma: no cover (py<3.9)
+                if not str(resolved).startswith(str(assets_root) + "/"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="image_asset_id must resolve under ASSETS_PATH (security restriction)",
+                    )
+            if not resolved.exists() or not resolved.is_file():
+                raise HTTPException(status_code=404, detail="Asset file not found on disk")
+            image_input = resolved
+        else:
+            assert payload.image_path is not None
+            image_input = Path(payload.image_path)
 
         result = await service.restore_faces(
-            image=image,
+            image=image_input,
             model_name=payload.model,
             upscale=payload.upscale,
             only_center_face=payload.only_center_face,

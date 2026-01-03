@@ -1906,12 +1906,27 @@ export default function App() {
         return;
       }
 
-      const dataUrl = await urlToDataUrl(imageUrl);
+      const userId = queueUserFilter || "local";
+      let assetId = "";
+      if (isOutputsUrl(imageUrl)) {
+        const imported = await apiPost<any>("/api/v1/assets/import_from_output", {
+          image_url: imageUrl,
+          category: "reference",
+          tags: [],
+          description: ""
+        });
+        assetId = imported?.data?.asset_id;
+        if (!imported?.success || typeof assetId !== "string") {
+          throw new Error(imported?.message || "匯入 outputs 失敗");
+        }
+      } else {
+        assetId = await uploadImageUrlAsAssetId(imageUrl, { category: "reference" });
+      }
       const resp = await apiPost<any>("/api/v1/upscale/", {
-        image: dataUrl,
+        image_asset_id: assetId,
         scale,
         model: "RealESRGAN_x4plus",
-        user_id: queueUserFilter || "local"
+        user_id: userId
       });
       const url = resp?.data?.result?.image_url;
       if (typeof url === "string") {
@@ -1976,12 +1991,27 @@ export default function App() {
         return;
       }
 
-      const dataUrl = await urlToDataUrl(imageUrl);
+      const userId = queueUserFilter || "local";
+      let assetId = "";
+      if (isOutputsUrl(imageUrl)) {
+        const imported = await apiPost<any>("/api/v1/assets/import_from_output", {
+          image_url: imageUrl,
+          category: "reference",
+          tags: [],
+          description: ""
+        });
+        assetId = imported?.data?.asset_id;
+        if (!imported?.success || typeof assetId !== "string") {
+          throw new Error(imported?.message || "匯入 outputs 失敗");
+        }
+      } else {
+        assetId = await uploadImageUrlAsAssetId(imageUrl, { category: "reference" });
+      }
       const resp = await apiPost<any>("/api/v1/face_restore/", {
-        image: dataUrl,
+        image_asset_id: assetId,
         model: "GFPGAN_v1.4",
         upscale: 2,
-        user_id: queueUserFilter || "local"
+        user_id: userId
       });
       const url = resp?.data?.result?.image_url;
       if (typeof url === "string") {
