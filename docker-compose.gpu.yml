@@ -1,0 +1,25 @@
+# docker-compose.gpu.yml - GPU enablement overlay
+version: "3.8"
+
+services:
+  api:
+    gpus: all
+    environment:
+      DEVICE: cuda
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+  worker-generation:
+    gpus: all
+    environment:
+      DEVICE: cuda
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+  worker-postprocess:
+    gpus: all
+    environment:
+      DEVICE: cuda
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+

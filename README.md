@@ -17,6 +17,37 @@
 
 > 備註：下方的「資料夾架構」區塊包含早期原型（`backend/`、`frontend/web/` 等），目前主要後端以 `app/` 為準、主要前端以 `frontend/react/` 為準。
 
+## 🐳 Docker Compose（容器化啟動）
+
+> 重要：容器仍遵守 `~/Desktop/data_model_structure.md`。預設會 bind-mount：
+> - 模型：`${AI_MODELS_ROOT:-/mnt/c/ai_models}`
+> - 快取：`${AI_CACHE_ROOT:-/mnt/c/ai_cache}`
+> - 產出：`${AI_OUTPUT_ROOT:-/mnt/data/training/runs/sd-multimodal-platform}`
+
+1) （建議）先準備 `.env`（用於 compose 變數插值；不會提交）：
+```bash
+cp .env.example .env
+```
+
+2) 啟動後端 + Redis + Celery workers（CPU/auto 模式）：
+```bash
+docker compose up --build
+```
+
+3) 啟動前端（Vite dev server，預設 profile）：
+```bash
+docker compose --profile frontend up --build
+```
+
+4) GPU（需要 NVIDIA Container Toolkit / Docker Desktop GPU 支援）：
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
+常用連結：
+- API：`http://localhost:8000/`（Docs：`http://localhost:8000/api/v1/docs`）
+- Frontend（profile=frontend）：`http://localhost:5173/`
+
 # 📁 專案資料夾架構
 
 ```

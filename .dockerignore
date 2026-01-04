@@ -1,0 +1,27 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Local runtime artifacts
+outputs
+assets
+logs
+metadata
+
+# Frontend deps/artifacts
+frontend/**/node_modules
+frontend/**/dist
+
+# Large local data (models/caches live outside repo per spec)
+cache
+models
+

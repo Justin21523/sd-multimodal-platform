@@ -67,9 +67,6 @@ outputs/
 .DS_Store
 Thumbs.db
 
-# Docker
-.dockerignore
-
 # Node.js (for frontend)
 node_modules/
 npm-debug.log*
