@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SD Multi-Modal Platform - Portfolio Demo</title>
+    <meta
+      name="description"
+      content="SD Multi-Modal Platform portfolio demo: FastAPI, React, Redis/Celery, mock-safe Stable Diffusion workflow."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#app" aria-label="SD Multi-Modal Platform">
+        <span class="brand-mark">SD</span>
+        <span>
+          <strong>SD Multi-Modal Platform</strong>
+          <small>Mock-safe portfolio demo</small>
+        </span>
+      </a>
+      <nav class="nav" aria-label="Demo sections">
+        <a href="#app">Demo</a>
+        <a href="#media">Media</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#runbook">Runbook</a>
+        <a href="https://github.com/Justin21523/sd-multimodal-platform">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section id="app" class="workspace" aria-label="Product demo">
+        <aside class="sidebar">
+          <div class="status-card">
+            <span class="status-dot"></span>
+            <div>
+              <strong>Demo Mode Active</strong>
+              <span>CPU safe, no model weights required</span>
+            </div>
+          </div>
+          <button class="side-item active" type="button">Generate</button>
+          <button class="side-item" type="button">Queue</button>
+          <button class="side-item" type="button">Assets</button>
+          <button class="side-item" type="button">History</button>
+          <div class="side-metrics">
+            <div><span>API routers</span><strong>9</strong></div>
+            <div><span>Queue states</span><strong>7</strong></div>
+            <div><span>Demo latency</span><strong>0.9s</strong></div>
+          </div>
+        </aside>
+
+        <section class="console">
+          <div class="console-head">
+            <div>
+              <p class="eyebrow">Portfolio-ready AI generation workbench</p>
+              <h1>Stable Diffusion 工作流展示台</h1>
+              <p>
+                文生圖、圖生圖、inpaint、後處理、資產與歷史紀錄集中到同一個 FastAPI + React 介面。
+                此公開頁使用 deterministic mock flow，讓面試官不用 GPU 也能看懂系統行為。
+              </p>
+            </div>
+            <div class="health-panel">
+              <span>Health</span>
+              <strong id="health-label">healthy</strong>
+              <small>FastAPI mock-safe mode</small>
+            </div>
+          </div>
+
+          <div class="workgrid">
+            <form class="prompt-panel" id="demo-form">
+              <div class="panel-title">
+                <span>Prompt Studio</span>
+                <strong>txt2img</strong>
+              </div>
+              <label>
+                Prompt
+                <textarea id="prompt" rows="5">portfolio-ready AI image generation dashboard, clean product UI, model queue, asset browser, high contrast, crisp details</textarea>
+              </label>
+              <label>
+                Negative prompt
+                <input id="negative" value="blurry, low quality, broken layout, unreadable text" />
+              </label>
+              <div class="controls">
+                <label>
+                  Model
+                  <select id="model">
+                    <option>sdxl-base</option>
+                    <option>sd-1.5</option>
+                    <option>sd-2.1</option>
+                  </select>
+                </label>
+                <label>
+                  Seed
+                  <input id="seed" value="21523" />
+                </label>
+                <label>
+                  Steps
+                  <input id="steps" value="24" />
+                </label>
+              </div>
+              <button class="primary" type="submit">Run mock pipeline</button>
+            </form>
+
+            <section class="result-panel">
+              <div class="panel-title">
+                <span>Generated Result</span>
+                <strong id="result-state">ready</strong>
+              </div>
+              <div class="result-image" id="result-image">
+                <div class="mock-art">
+                  <span>txt2img preview</span>
+                  <strong>1024 x 1024 PNG</strong>
+                </div>
+              </div>
+              <div class="result-meta">
+                <div><span>Task</span><strong id="task-id">txt2img_demo_21523</strong></div>
+                <div><span>Model</span><strong id="meta-model">sdxl-base</strong></div>
+                <div><span>Mode</span><strong>mock-safe</strong></div>
+              </div>
+            </section>
+          </div>
+
+          <section class="lower-grid">
+            <div class="queue-panel">
+              <div class="panel-title">
+                <span>Queue Monitor</span>
+                <strong id="queue-state">completed</strong>
+              </div>
+              <ol class="timeline" id="timeline">
+                <li class="done">Request validated</li>
+                <li class="done">Task enqueued</li>
+                <li class="done">Mock renderer completed</li>
+                <li class="done">History + metadata saved</li>
+              </ol>
+            </div>
+
+            <div class="asset-panel">
+              <div class="panel-title">
+                <span>Assets & History</span>
+                <strong>indexed</strong>
+              </div>
+              <div class="asset-list">
+                <article>
+                  <span class="asset-thumb a"></span>
+                  <div><strong>reference-dashboard.png</strong><small>reference asset</small></div>
+                </article>
+                <article>
+                  <span class="asset-thumb b"></span>
+                  <div><strong>mock-output-21523.png</strong><small>generated output</small></div>
+                </article>
+                <article>
+                  <span class="asset-thumb c"></span>
+                  <div><strong>history-record.json</strong><small>rerunnable metadata</small></div>
+                </article>
+              </div>
+            </div>
+          </section>
+        </section>
+      </section>
+
+      <section id="media" class="band">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Demo evidence</p>
+            <h2>可直接截圖與錄影展示的狀態畫面</h2>
+          </div>
+          <a class="text-link" href="./media/demo/demo-walkthrough.webm">Open walkthrough video</a>
+        </div>
+        <div class="media-layout">
+          <figure class="video-frame">
+            <video controls poster="./media/screenshots/02-generated-result-desktop.png">
+              <source src="./media/demo/demo-walkthrough.webm" type="video/webm" />
+            </video>
+            <figcaption>90 秒內可展示 prompt、mock generation、queue/result 狀態與架構導覽。</figcaption>
+          </figure>
+          <div class="shot-grid">
+            <figure>
+              <img src="./media/screenshots/01-workbench-desktop.png" alt="Desktop workbench screenshot" />
+              <figcaption>Desktop workbench</figcaption>
+            </figure>
+            <figure>
+              <img src="./media/screenshots/02-generated-result-desktop.png" alt="Generated result screenshot" />
+              <figcaption>Generated result</figcaption>
+            </figure>
+            <figure>
+              <img src="./media/screenshots/03-workbench-mobile.png" alt="Mobile responsive screenshot" />
+              <figcaption>Mobile responsive</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture" class="band">
+        <div class="section-head">
+          <p class="eyebrow">System map</p>
+          <h2>從 prompt 到 output 的可觀測生成管線</h2>
+        </div>
+        <div class="architecture">
+          <div>React Workbench</div>
+          <span></span>
+          <div>FastAPI v1 Routers</div>
+          <span></span>
+          <div>Model Registry</div>
+          <span></span>
+          <div>Redis/Celery Queue</div>
+          <span></span>
+          <div>Outputs + Assets + History</div>
+        </div>
+        <div class="capabilities">
+          <article><strong>Mock-safe demo</strong><p>沒有 GPU、模型權重或 Redis 時仍可展示核心 API 與 UI flow。</p></article>
+          <article><strong>Graceful degradation</strong><p>選配服務缺席時 API 保持可啟動，相關端點回傳明確狀態。</p></article>
+          <article><strong>Portfolio evidence</strong><p>提供截圖、錄影、README 架構圖與可重跑 smoke tests。</p></article>
+        </div>
+      </section>
+
+      <section id="runbook" class="band split">
+        <div>
+          <p class="eyebrow">Interview flow</p>
+          <h2>建議展示流程</h2>
+          <p>
+            先用此頁展示產品本體，再切到 README 的 Mermaid 架構圖，最後本機啟動 mock backend
+            執行 smoke test，說明 full mode 如何接上真模型與 Redis/Celery worker。
+          </p>
+        </div>
+        <pre><code>MOCK_GENERATION=true MINIMAL_MODE=true DEVICE=cpu \
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+python scripts/smoke_api.py
+cd frontend/react && npm run typecheck && npm run build</code></pre>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
