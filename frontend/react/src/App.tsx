@@ -569,6 +569,28 @@ export default function App() {
     };
   }, []);
 
+  const refreshQueueOnce = useCallback(async () => {
+    setError("");
+    setQueueLoading(true);
+    try {
+      const overview = await apiGet<QueueOverview>("/api/v1/queue/status");
+      const tasks = await apiGet<QueueTaskList>(
+        withQuery("/api/v1/queue/tasks", {
+          status: queueStatusFilter || undefined,
+          user_id: queueUserFilter || undefined,
+          page: queuePage,
+          page_size: queuePageSize
+        })
+      );
+      setQueueOverview(overview);
+      setQueueTasks(tasks);
+    } catch (e: any) {
+      setError(`佇列讀取失敗：${formatApiError(e)}`);
+    } finally {
+      setQueueLoading(false);
+    }
+  }, [queuePage, queuePageSize, queueStatusFilter, queueUserFilter]);
+
   useEffect(() => {
     if (!modelId && activeModelId) setModelId(activeModelId);
   }, [activeModelId, modelId]);
@@ -2208,28 +2230,6 @@ export default function App() {
       setApplyingAsset(false);
     }
   }
-
-  const refreshQueueOnce = useCallback(async () => {
-    setError("");
-    setQueueLoading(true);
-    try {
-      const overview = await apiGet<QueueOverview>("/api/v1/queue/status");
-      const tasks = await apiGet<QueueTaskList>(
-        withQuery("/api/v1/queue/tasks", {
-          status: queueStatusFilter || undefined,
-          user_id: queueUserFilter || undefined,
-          page: queuePage,
-          page_size: queuePageSize
-        })
-      );
-      setQueueOverview(overview);
-      setQueueTasks(tasks);
-    } catch (e: any) {
-      setError(`佇列讀取失敗：${formatApiError(e)}`);
-    } finally {
-      setQueueLoading(false);
-    }
-  }, [queuePage, queuePageSize, queueStatusFilter, queueUserFilter]);
 
   async function cancelQueueTask(taskId: string, opts?: { force?: boolean }) {
     setError("");

@@ -74,6 +74,22 @@ async def _load_asset_image(asset_id: str) -> Image.Image:
     return _pil_image_from_file(resolved)
 
 
+def _json_safe_generation_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep metadata useful without leaking PIL objects into API responses."""
+    safe: Dict[str, Any] = {}
+    for key, value in params.items():
+        if isinstance(value, Image.Image):
+            safe[key] = {
+                "type": "PIL.Image",
+                "width": value.width,
+                "height": value.height,
+                "mode": value.mode,
+            }
+        else:
+            safe[key] = value
+    return safe
+
+
 @router.post("/", response_model=GenerationResponse)
 async def generate_img2img(
     request: Img2ImgRequest, background_tasks: BackgroundTasks, http_request: Request
@@ -123,6 +139,8 @@ async def generate_img2img(
 
         # Get model manager and ensure model is loaded
         model_manager = get_model_manager()
+        if settings.MOCK_GENERATION and not model_manager.is_initialized:
+            await model_manager.initialize(settings.PRIMARY_MODEL)
         if not model_manager.is_initialized:
             raise HTTPException(
                 status_code=503,
@@ -236,14 +254,15 @@ async def generate_img2img(
             )
 
         # Prepare metadata
+        safe_generation_params = _json_safe_generation_params(
+            generation_params
+            if not request.controlnet
+            else controlnet_result.get("generation_params", {})  # type: ignore
+        )
         metadata = {
             "task_id": task_id,
             "request_params": request.model_dump(),
-            "generation_params": (
-                generation_params
-                if not request.controlnet
-                else controlnet_result.get("generation_params", {})  # type: ignore
-            ),
+            "generation_params": safe_generation_params,
             "model_used": model_manager.current_model,
             "processing_time": processing_time,
             "image_count": len(generated_images),
@@ -403,6 +422,8 @@ async def generate_inpaint(
 
         # Get model manager
         model_manager = get_model_manager()
+        if settings.MOCK_GENERATION and not model_manager.is_initialized:
+            await model_manager.initialize(settings.PRIMARY_MODEL)
         if not model_manager.is_initialized:
             raise HTTPException(status_code=503, detail="Model manager not initialized")
 
@@ -462,10 +483,11 @@ async def generate_inpaint(
             )
 
         # Prepare metadata
+        safe_generation_params = _json_safe_generation_params(generation_params)
         metadata = {
             "task_id": task_id,
             "request_params": request.model_dump(),
-            "generation_params": generation_params,
+            "generation_params": safe_generation_params,
             "model_used": model_manager.current_model,
             "processing_time": processing_time,
             "image_count": len(generated_images),

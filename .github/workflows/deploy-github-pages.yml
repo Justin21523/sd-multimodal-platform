@@ -1,0 +1,36 @@
+name: Deploy GitHub Pages Demo
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sd-multimodal-platform-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify static demo files
+        run: |
+          test -f portfolio-web/index.html
+          test -f portfolio-web/styles.css
+          test -f portfolio-web/app.js
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./portfolio-web
+          force_orphan: true
+          enable_jekyll: false

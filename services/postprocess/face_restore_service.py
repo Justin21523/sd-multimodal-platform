@@ -11,11 +11,13 @@ import torch
 from PIL import Image
 
 try:
-    # Try to import GFPGAN
+    # Try to import GFPGAN. Some GFPGAN/basicsr combinations can fail during
+    # module registration, so treat any import-time error as an optional-missing
+    # dependency and fall back to the lightweight demo implementation.
     from gfpgan import GFPGANer
 
     GFPGAN_AVAILABLE = True
-except ImportError:
+except Exception:  # pragma: no cover
     GFPGANer = None
     GFPGAN_AVAILABLE = False
 

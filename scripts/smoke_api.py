@@ -1,129 +1,129 @@
 #!/usr/bin/env python3
 """
-Comprehensive API smoke tests
+Mock-safe API smoke tests.
+
+Run against a local server started with:
+  MOCK_GENERATION=true MINIMAL_MODE=true DEVICE=cpu uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
-import sys
+
+from __future__ import annotations
+
+import base64
+import io
 import os
-import requests
-import json
+import sys
 import time
+from typing import Callable
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import requests
+from PIL import Image
 
-BASE_URL = "http://localhost:8000/api/v1"
+
+API_BASE = os.environ.get("API_BASE", "http://localhost:8000").rstrip("/")
+BASE_URL = f"{API_BASE}/api/v1"
 
 
-def test_health():
-    """Test health endpoint"""
-    print("🧪 Testing health endpoint...")
-    response = requests.get(f"{BASE_URL}/health")
+def _assert_png_base64(value: str) -> None:
+    if value.startswith("data:image/png;base64,"):
+        value = value.split(",", 1)[1]
+    assert value, "expected PNG base64"
+    raw = base64.b64decode(value)
+    assert raw.startswith(b"\x89PNG"), "decoded image is not PNG"
+
+
+def _sample_image_data_url(color: str = "red") -> str:
+    image = Image.new("RGB", (256, 256), color=color)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def test_health() -> None:
+    response = requests.get(f"{BASE_URL}/health", timeout=10)
     assert response.status_code == 200
     data = response.json()
-    assert data["success"] == True
-    assert data["cache_initialized"] == True
-    assert "device_info" in data
-    print("✅ Health test passed")
+    assert data["status"] in {"healthy", "degraded", "unhealthy"}
+    assert data["service"]["name"] == "SD Multi-Modal Platform"
 
 
-def test_caption():
-    """Test caption endpoint"""
-    print("🧪 Testing caption endpoint...")
-
-    # Create a simple test image (red 100x100)
-    from PIL import Image
-    import io
-    import base64
-
-    image = Image.new("RGB", (100, 100), color="red")
-    buffered = io.BytesIO()
-    image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-
-    payload = {"image": f"data:image/jpeg;base64,{img_str}", "max_length": 50}
-
-    response = requests.post(f"{BASE_URL}/caption", json=payload)
+def test_models() -> None:
+    response = requests.get(f"{BASE_URL}/models", timeout=10)
     assert response.status_code == 200
     data = response.json()
-    assert data["success"] == True
-    assert "caption" in data
-    print("✅ Caption test passed")
+    assert data["success"] is True
+    assert len(data["data"]["models"]) >= 1
 
 
-def test_queue():
-    """Test queue endpoints"""
-    print("🧪 Testing queue endpoints...")
-
-    # Submit a task
-    payload = {"task_type": "caption", "parameters": {"test": "data"}, "priority": 1}
-
-    response = requests.post(f"{BASE_URL}/queue/submit", json=payload)
-    assert response.status_code == 200
+def test_txt2img_mock() -> None:
+    payload = {
+        "prompt": "portfolio demo dashboard, crisp UI, cinematic lighting",
+        "negative_prompt": "blurry, low quality",
+        "width": 512,
+        "height": 512,
+        "steps": 4,
+        "cfg_scale": 7.5,
+        "seed": 21523,
+        "num_images": 1,
+        "save_images": False,
+        "return_base64": True,
+    }
+    response = requests.post(f"{BASE_URL}/txt2img/", json=payload, timeout=20)
+    assert response.status_code == 200, response.text[:500]
     data = response.json()
-    assert "task_id" in data
-    task_id = data["task_id"]
-    print(f"✅ Task submitted: {task_id}")
+    assert data["success"] is True
+    image = data["data"]["results"]["images"][0]
+    _assert_png_base64(image["base64"])
 
-    # Check status
-    response = requests.get(f"{BASE_URL}/queue/status/{task_id}")
-    assert response.status_code == 200
+
+def test_img2img_mock() -> None:
+    payload = {
+        "prompt": "turn this into a portfolio-ready generated image preview",
+        "init_image": _sample_image_data_url("steelblue"),
+        "width": 512,
+        "height": 512,
+        "strength": 0.55,
+        "steps": 4,
+        "cfg_scale": 7.0,
+        "seed": 21523,
+    }
+    response = requests.post(f"{BASE_URL}/img2img/", json=payload, timeout=20)
+    assert response.status_code == 200, response.text[:500]
     data = response.json()
-    assert data["task_id"] == task_id
-    print("✅ Queue status test passed")
-
-    # List tasks
-    response = requests.get(f"{BASE_URL}/queue/list")
-    assert response.status_code == 200
-    data = response.json()
-    assert "tasks" in data
-    print("✅ Queue list test passed")
+    assert data["success"] is True
+    assert data["data"]["images"], "expected saved image URL"
 
 
-def test_rate_limits():
-    """Test rate limiting"""
-    print("🧪 Testing rate limits...")
-
-    # Make multiple rapid requests
-    for i in range(5):
-        response = requests.get(f"{BASE_URL}/health")
-        if response.status_code == 429:
-            print("✅ Rate limiting working")
-            return
-
-    print("⚠️  Rate limiting not triggered (may be configured per minute)")
+def test_queue_degrades_without_redis() -> None:
+    response = requests.get(f"{BASE_URL}/queue/status", timeout=10)
+    assert response.status_code in {200, 503}
+    if response.status_code == 200:
+        data = response.json()
+        assert "queue_stats" in data
 
 
-def run_all_tests():
-    """Run all smoke tests"""
-    tests = [test_health, test_caption, test_queue, test_rate_limits]
+def run_all_tests() -> bool:
+    tests: list[Callable[[], None]] = [
+        test_health,
+        test_models,
+        test_txt2img_mock,
+        test_img2img_mock,
+        test_queue_degrades_without_redis,
+    ]
 
     passed = 0
     for test in tests:
         try:
             test()
+            print(f"PASS {test.__name__}")
             passed += 1
-        except Exception as e:
-            print(f"❌ {test.__name__} failed: {e}")
+        except Exception as exc:
+            print(f"FAIL {test.__name__}: {exc}")
 
-    print(f"\n📊 Test Results: {passed}/{len(tests)} passed")
+    print(f"\nSmoke results: {passed}/{len(tests)} passed")
     return passed == len(tests)
 
 
 if __name__ == "__main__":
-    print("🚀 Starting Comprehensive API Smoke Tests...\n")
-
-    try:
-        # Wait for service to be ready
-        time.sleep(2)
-
-        success = run_all_tests()
-
-        if success:
-            print("🎉 All smoke tests passed!")
-            sys.exit(0)
-        else:
-            print("💥 Some tests failed!")
-            sys.exit(1)
-
-    except Exception as e:
-        print(f"💥 Smoke tests failed to run: {e}")
-        sys.exit(1)
+    print(f"Running API smoke tests against {BASE_URL}")
+    time.sleep(1)
+    sys.exit(0 if run_all_tests() else 1)

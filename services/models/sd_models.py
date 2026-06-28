@@ -6,11 +6,12 @@ Extended Stable Diffusion model management with img2img, inpaint, and auto-selec
 
 import logging
 import gc
+import hashlib
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union, Tuple, Callable
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 from diffusers.pipelines.stable_diffusion_xl.pipeline_output import (
     StableDiffusionXLPipelineOutput,
@@ -304,6 +305,22 @@ class ModelManager:
                 logger.error(f"Unknown model: {target_model}")
                 return False
 
+            if settings.MOCK_GENERATION:
+                self.current_model_id = target_model
+                self.current_model = target_model
+                self.current_model_path = "mock://deterministic-demo"
+                self.current_pipeline = object()  # type: ignore[assignment]
+                self.current_img2img_pipeline = object()  # type: ignore[assignment]
+                self.current_inpaint_pipeline = object()  # type: ignore[assignment]
+                self.is_initialized = True
+                self.startup_time = time.time() - start_time
+                self.last_optimization_info = {
+                    "mode": "mock",
+                    "reason": "MOCK_GENERATION=true",
+                }
+                logger.info("✅ ModelManager initialized in mock-safe demo mode")
+                return True
+
             # Check if model files exist
             model_path = self.base_models_path / model_info["local_path"]
             if not model_path.exists():
@@ -331,6 +348,18 @@ class ModelManager:
             model_info = ModelRegistry.AVAILABLE_MODELS.get(model_id)
             if not model_info:
                 raise ValueError(f"Unknown model: {model_id}")
+
+            if settings.MOCK_GENERATION:
+                await self._unload_current_model()
+                self.current_model_id = model_id
+                self.current_model = model_id
+                self.current_model_path = "mock://deterministic-demo"
+                self.current_pipeline = object()  # type: ignore[assignment]
+                self.current_img2img_pipeline = object()  # type: ignore[assignment]
+                self.current_inpaint_pipeline = object()  # type: ignore[assignment]
+                self.is_initialized = True
+                self.generation_stats["model_switches"] += 1
+                return True
 
             start_time = time.time()
             local_rel = model_info.get("local_path")
@@ -546,6 +575,26 @@ class ModelManager:
                 "num_images_per_prompt": num_images,
             }
 
+            if settings.MOCK_GENERATION:
+                images = [
+                    self._make_mock_image(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        width=width,
+                        height=height,
+                        seed=seed,
+                        mode="txt2img",
+                        index=i,
+                    )
+                    for i in range(num_images)
+                ]
+                self.generation_stats["total_generations"] += len(images)
+                return {
+                    "images": images,
+                    "generation_params": generation_params,
+                    "model_used": self.current_model,
+                }
+
             # Add seed if specified
             if seed is not None and seed != -1:
                 generation_params["generator"] = torch.Generator(
@@ -616,6 +665,27 @@ class ModelManager:
                 "guidance_scale": guidance_scale,
                 "num_images_per_prompt": num_images,
             }
+
+            if settings.MOCK_GENERATION:
+                base = image.resize((width or image.width, height or image.height))
+                images = [
+                    self._make_mock_img2img(
+                        base,
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        strength=strength,
+                        seed=seed,
+                        mode="img2img",
+                        index=i,
+                    )
+                    for i in range(num_images)
+                ]
+                self.generation_stats["total_generations"] += len(images)
+                return {
+                    "images": images,
+                    "generation_params": generation_params,
+                    "model_used": self.current_model,
+                }
 
             # Add dimensions if specified (for SDXL)
             if width and height:
@@ -693,6 +763,28 @@ class ModelManager:
                 "guidance_scale": guidance_scale,
                 "num_images_per_prompt": num_images,
             }
+
+            if settings.MOCK_GENERATION:
+                base = image.resize((width or image.width, height or image.height)).convert("RGB")
+                mask = mask_image.resize(base.size).convert("L")
+                images = [
+                    self._make_mock_inpaint(
+                        base,
+                        mask,
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        strength=strength,
+                        seed=seed,
+                        index=i,
+                    )
+                    for i in range(num_images)
+                ]
+                self.generation_stats["total_generations"] += len(images)
+                return {
+                    "images": images,
+                    "generation_params": generation_params,
+                    "model_used": self.current_model,
+                }
 
             # Add dimensions if specified (for SDXL)
             if width and height:
@@ -798,7 +890,101 @@ class ModelManager:
             "load_times": self.model_load_times,
             "generation_stats": self.generation_stats,
             "available_models": list(self.available_models.keys()),
+            "mock_generation": bool(settings.MOCK_GENERATION),
         }
+
+    def _mock_palette(self, text: str) -> Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]:
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return (
+            (digest[0], digest[1], digest[2]),
+            (digest[3], digest[4], digest[5]),
+            (digest[6], digest[7], digest[8]),
+        )
+
+    def _make_mock_image(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        seed: Optional[int],
+        mode: str,
+        index: int,
+    ) -> Image.Image:
+        seed_label = "auto" if seed is None else str(seed)
+        c1, c2, c3 = self._mock_palette(f"{mode}|{prompt}|{negative_prompt}|{seed_label}|{index}")
+        img = Image.new("RGB", (width, height), c1)
+        draw = ImageDraw.Draw(img)
+
+        band = max(2, height // 36)
+        for y in range(0, height, band):
+            t = y / max(1, height - 1)
+            color = tuple(int(c1[i] * (1 - t) + c2[i] * t) for i in range(3))
+            draw.rectangle([0, y, width, min(height, y + band)], fill=color)
+
+        for i in range(10):
+            x0 = int((i + 1) * width / 13)
+            y0 = int(((i * 7) % 11 + 1) * height / 14)
+            r = max(24, min(width, height) // (8 + (i % 4)))
+            fill = tuple((c3[j] + i * 18) % 256 for j in range(3))
+            draw.ellipse([x0 - r, y0 - r, x0 + r, y0 + r], outline=fill, width=max(2, width // 160))
+
+        draw.rectangle([18, 18, width - 18, height - 18], outline=c3, width=max(3, width // 180))
+        label = (
+            f"SD Multi-Modal Platform\n"
+            f"mock-safe {mode} demo\n"
+            f"model={self.current_model or settings.PRIMARY_MODEL} seed={seed_label}\n\n"
+            f"{prompt[:220]}"
+        )
+        pad = max(18, width // 28)
+        draw.multiline_text((pad, pad), label, fill=(255, 255, 255), spacing=6)
+        return img
+
+    def _make_mock_img2img(
+        self,
+        base: Image.Image,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        strength: float,
+        seed: Optional[int],
+        mode: str,
+        index: int,
+    ) -> Image.Image:
+        overlay = self._make_mock_image(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=base.width,
+            height=base.height,
+            seed=seed,
+            mode=mode,
+            index=index,
+        ).filter(ImageFilter.GaussianBlur(radius=2))
+        alpha = max(0.15, min(0.85, float(strength)))
+        return Image.blend(base.convert("RGB"), overlay, alpha)
+
+    def _make_mock_inpaint(
+        self,
+        base: Image.Image,
+        mask: Image.Image,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        strength: float,
+        seed: Optional[int],
+        index: int,
+    ) -> Image.Image:
+        patch = self._make_mock_img2img(
+            base,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            strength=strength,
+            seed=seed,
+            mode="inpaint",
+            index=index,
+        )
+        return Image.composite(patch, base, mask)
 
     async def _unload_current_model(self):
         """Unload current model to free memory"""
@@ -811,7 +997,8 @@ class ModelManager:
 
             for name, pipeline in pipelines:
                 if pipeline is not None:
-                    pipeline = pipeline.to("cpu")
+                    if hasattr(pipeline, "to"):
+                        pipeline = pipeline.to("cpu")
                     del pipeline
                     logger.info(f"🗑️ Unloaded {name} pipeline")
 

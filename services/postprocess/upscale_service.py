@@ -296,9 +296,9 @@ class UpscaleService:
             start_time = time.time()
             logger.info("🔍 Initializing Upscale service...")
 
-            if not REALESRGAN_AVAILABLE:
+            if settings.MOCK_GENERATION or getattr(settings, "TESTING", False) or not REALESRGAN_AVAILABLE:
                 logger.warning(
-                    "Real-ESRGAN not available, using fallback implementation"
+                    "Real-ESRGAN unavailable or disabled for mock/testing, using fallback implementation"
                 )
                 if model_name in self.available_models:
                     self.current_model = model_name
@@ -493,7 +493,7 @@ class UpscaleService:
             )
 
             # Perform upscaling
-            if settings.MOCK_GENERATION or not REALESRGAN_AVAILABLE:
+            if settings.MOCK_GENERATION or getattr(settings, "TESTING", False) or not REALESRGAN_AVAILABLE:
                 # Mock upscaling for testing
                 if abort_check is not None:
                     abort_check()

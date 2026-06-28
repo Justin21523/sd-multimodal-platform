@@ -47,14 +47,19 @@ async function parseJsonSafe(response: Response) {
   }
 }
 
+async function throwApiError(response: Response): Promise<never> {
+  const detail = await parseJsonSafe(response);
+  const error: ApiError = { message: "Request failed", status: response.status, detail };
+  throw error;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(apiUrl(path), {
     method: "GET",
     headers: { Accept: "application/json" }
   });
   if (!response.ok) {
-    const detail = await parseJsonSafe(response);
-    throw { message: "Request failed", status: response.status, detail } satisfies ApiError;
+    await throwApiError(response);
   }
   return (await response.json()) as T;
 }
@@ -66,8 +71,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body)
   });
   if (!response.ok) {
-    const detail = await parseJsonSafe(response);
-    throw { message: "Request failed", status: response.status, detail } satisfies ApiError;
+    await throwApiError(response);
   }
   return (await response.json()) as T;
 }
@@ -79,8 +83,7 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body)
   });
   if (!response.ok) {
-    const detail = await parseJsonSafe(response);
-    throw { message: "Request failed", status: response.status, detail } satisfies ApiError;
+    await throwApiError(response);
   }
   return (await response.json()) as T;
 }
@@ -91,8 +94,7 @@ export async function apiDelete<T>(path: string): Promise<T> {
     headers: { Accept: "application/json" }
   });
   if (!response.ok) {
-    const detail = await parseJsonSafe(response);
-    throw { message: "Request failed", status: response.status, detail } satisfies ApiError;
+    await throwApiError(response);
   }
   return (await response.json()) as T;
 }
@@ -104,8 +106,7 @@ export async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
     body: form
   });
   if (!response.ok) {
-    const detail = await parseJsonSafe(response);
-    throw { message: "Request failed", status: response.status, detail } satisfies ApiError;
+    await throwApiError(response);
   }
   return (await response.json()) as T;
 }
@@ -116,8 +117,7 @@ export async function apiPostEmpty<T>(path: string): Promise<T> {
     headers: { Accept: "application/json" }
   });
   if (!response.ok) {
-    const detail = await parseJsonSafe(response);
-    throw { message: "Request failed", status: response.status, detail } satisfies ApiError;
+    await throwApiError(response);
   }
   return (await response.json()) as T;
 }

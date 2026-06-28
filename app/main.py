@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
 
     # Best-effort model warmup so sync endpoints work out-of-the-box.
     # Keep the API bootable even when models aren't installed yet.
-    if not settings.MINIMAL_MODE and not getattr(settings, "TESTING", False):
+    if (settings.MOCK_GENERATION or not settings.MINIMAL_MODE) and not getattr(settings, "TESTING", False):
         try:
             from services.models.sd_models import get_model_manager
 

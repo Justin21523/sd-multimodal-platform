@@ -1,229 +1,328 @@
 # SD Multi-Modal Platform
 
-## ✅ 快速開始（目前推薦流程）
+> Portfolio-ready Stable Diffusion platform demo: FastAPI backend, React workbench, Redis/Celery queue design, asset/history management, and a mock-safe public showcase that runs without GPU or model weights.
 
-- 啟用環境：`conda activate ai_env`
-- 依照 `~/Desktop/data_model_structure.md`：
-  - 模型：`/mnt/c/ai_models`
-  - 快取：`/mnt/c/ai_cache`（建議設定 `HF_HOME`/`TRANSFORMERS_CACHE`/`TORCH_HOME`/`XDG_CACHE_HOME`）
-  - 產出：`/mnt/data/training/runs/sd-multimodal-platform/outputs`
-- 設定環境：`cp .env.example .env`（不要提交 secrets）
-- 啟動後端：`uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
-- （可選）啟用非同步佇列（Redis + Celery worker）：
-  - Redis（擇一）：`redis-server` 或 `docker run -p 6379:6379 redis:7-alpine`
-  - Worker：`celery -A app.workers.celery_worker worker --loglevel=info --queues=generation,postprocess`
-- 啟動前端（React）：`cd frontend/react && npm install && VITE_API_BASE_URL=http://localhost:8000 npm run dev`
-- API 文件：`http://localhost:8000/api/v1/docs`（健康檢查：`http://localhost:8000/health`）
+[Live demo](https://justin21523.github.io/sd-multimodal-platform/) · [Portfolio case study](https://justin21523.github.io/zh-TW/projects/sd-multimodal-platform/) · [API docs local](http://localhost:8000/api/v1/docs)
 
-> 備註：下方的「資料夾架構」區塊包含早期原型（`backend/`、`frontend/web/` 等），目前主要後端以 `app/` 為準、主要前端以 `frontend/react/` 為準。
+![Portfolio demo cover](docs/demo/cover.webp)
 
-## 🐳 Docker Compose（容器化啟動）
+## What This Project Demonstrates
 
-> 重要：容器仍遵守 `~/Desktop/data_model_structure.md`。預設會 bind-mount：
-> - 模型：`${AI_MODELS_ROOT:-/mnt/c/ai_models}`
-> - 快取：`${AI_CACHE_ROOT:-/mnt/c/ai_cache}`
-> - 產出：`${AI_OUTPUT_ROOT:-/mnt/data/training/runs/sd-multimodal-platform}`
+SD Multi-Modal Platform turns a local Stable Diffusion research stack into a product-shaped AI generation platform. The project is built around a FastAPI service, a React + TypeScript workbench, model routing, queue orchestration, output storage, reusable assets, and rerunnable history.
 
-1) （建議）先準備 `.env`（用於 compose 變數插值；不會提交）：
+The public version is intentionally **mock-safe**. It demonstrates the full product flow without requiring private model weights, CUDA, Redis, or external services. Full Stable Diffusion mode remains available for local GPU environments that have the required model assets under `/mnt/c/ai_models`.
+
+| Area | Demo-ready behavior | Full-mode extension |
+| --- | --- | --- |
+| Text-to-image | Deterministic PIL renderer through `/api/v1/txt2img/` | Diffusers SDXL / SD 1.5 pipelines |
+| Image-to-image | Mock blend/stylization through `/api/v1/img2img/` | Diffusers img2img pipeline |
+| Inpainting | Mask-composite mock renderer | Diffusers inpaint pipeline |
+| Post-processing | Pillow/OpenCV fallback for smoke-safe runs | Real-ESRGAN / GFPGAN / CodeFormer |
+| Queue | API degrades cleanly when Redis is absent | Redis + Celery generation/postprocess workers |
+| Frontend | React workbench builds and can connect to mock API | Same UI against real local models |
+| Public demo | GitHub Pages static interactive demo | Optional hosted API if a GPU/runtime host is available |
+
+## Demo Screens
+
+| Workbench | Generated result | Mobile |
+| --- | --- | --- |
+| ![Workbench desktop](docs/demo/screenshots/01-workbench-desktop.png) | ![Generated result desktop](docs/demo/screenshots/02-generated-result-desktop.png) | ![Mobile workbench](docs/demo/screenshots/03-workbench-mobile.png) |
+
+Demo video: [`docs/demo/demo/demo-walkthrough.webm`](docs/demo/demo/demo-walkthrough.webm)
+
+## Product Flow
+
+```mermaid
+flowchart LR
+    A[Prompt / source image] --> B[React workbench]
+    B --> C[FastAPI v1 routers]
+    C --> D{Run mode}
+    D -->|Mock-safe| E[Deterministic PIL renderer]
+    D -->|Full GPU| F[Diffusers SD / SDXL pipelines]
+    F --> G[Optional ControlNet / postprocess]
+    E --> H[Output image + metadata]
+    G --> H
+    H --> I[Outputs / Assets / History]
+    I --> J[Rerun, import, inspect]
+```
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Client["Client Layer"]
+      UI[React + TypeScript Vite Workbench]
+      Static[GitHub Pages Portfolio Demo]
+    end
+
+    subgraph API["FastAPI Service"]
+      MW[Logging / Auth / Rate Limit / CORS]
+      R1[txt2img / img2img / inpaint]
+      R2[upscale / face_restore]
+      R3[assets / history / models / queue / health]
+    end
+
+    subgraph Services["Service Layer"]
+      MM[ModelManager + ModelRegistry]
+      AM[AssetManager]
+      HS[HistoryStore]
+      QM[QueueManager]
+      PP[Postprocess services]
+    end
+
+    subgraph Runtime["Runtime / Storage"]
+      Models[/mnt/c/ai_models]
+      Cache[/mnt/c/ai_cache]
+      Outputs[/mnt/data/.../outputs]
+      Assets[/mnt/data/.../assets]
+      Logs[/mnt/data/.../logs]
+      Redis[(Redis optional)]
+      Celery[Celery workers optional]
+    end
+
+    UI --> MW
+    Static --> UI
+    MW --> R1
+    MW --> R2
+    MW --> R3
+    R1 --> MM
+    R2 --> PP
+    R3 --> AM
+    R3 --> HS
+    R3 --> QM
+    MM --> Models
+    MM --> Cache
+    PP --> Outputs
+    AM --> Assets
+    HS --> Logs
+    QM --> Redis
+    Redis --> Celery
+```
+
+## API Request Sequence
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as React Workbench
+    participant API as FastAPI Router
+    participant Model as ModelManager
+    participant Store as Output/History Store
+
+    User->>UI: Submit prompt
+    UI->>API: POST /api/v1/txt2img/
+    API->>Model: initialize or switch model
+    alt MOCK_GENERATION=true
+        Model-->>API: deterministic PIL image
+    else Full model mode
+        Model-->>API: Diffusers generated image
+    end
+    API->>Store: Save output and metadata
+    Store-->>API: output URL / history record
+    API-->>UI: task_id, images, metadata
+    UI-->>User: Result, status, rerun context
+```
+
+## Queue Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: enqueue
+    pending --> running: worker picks task
+    running --> completed: result saved
+    running --> failed: exception
+    running --> cancelled: user cancel
+    failed --> retrying: retry
+    retrying --> pending
+    completed --> [*]
+    cancelled --> [*]
+```
+
+## Module Organization
+
+```mermaid
+flowchart LR
+    Root[sd-multimodal-platform]
+    Root --> App[app/: FastAPI entrypoint, routers, middleware, schemas]
+    Root --> Services[services/: generation, model registry, queue, postprocess, assets/history]
+    Root --> Frontend[frontend/react/: preferred React UI]
+    Root --> Portfolio[portfolio-web/: static GitHub Pages demo]
+    Root --> Scripts[scripts/: smoke checks, setup, demo asset capture]
+    Root --> Tests[tests/: pytest suite]
+    Root --> Docs[docs/: guides and generated demo media]
+    Root --> Legacy[frontend/gradio_app, frontend/desktop, frontend/web, backend: legacy prototypes]
+```
+
+## Data And Storage Layout
+
+This repo follows `~/Desktop/data_model_structure.md`.
+
+| Purpose | Path |
+| --- | --- |
+| Models | `/mnt/c/ai_models` |
+| Hugging Face / Torch caches | `/mnt/c/ai_cache` |
+| Generated outputs | `/mnt/data/training/runs/sd-multimodal-platform/outputs` |
+| Uploaded/imported assets | `/mnt/data/training/runs/sd-multimodal-platform/assets` |
+| Logs and history records | `/mnt/data/training/runs/sd-multimodal-platform/logs` |
+
+```mermaid
+flowchart TB
+    Request[API request] --> Output[Generated output file]
+    Request --> Metadata[Metadata JSON]
+    Upload[User upload] --> Asset[Asset file + thumbnail]
+    Output --> History[History JSON record]
+    Metadata --> History
+    Asset --> History
+    Output --> Public[/outputs/* URL]
+    Asset --> PublicAssets[/assets/* URL]
+```
+
+## Local Quick Start
+
+### 1. Environment
+
 ```bash
-cp .env.example .env
+conda activate ai_env
+cp .env.example .env  # if present; never commit secrets
+
+export HF_HOME=/mnt/c/ai_cache
+export TRANSFORMERS_CACHE=/mnt/c/ai_cache
+export TORCH_HOME=/mnt/c/ai_cache
+export XDG_CACHE_HOME=/mnt/c/ai_cache
 ```
 
-2) 啟動後端 + Redis + Celery workers（CPU/auto 模式）：
+### 2. Mock-safe backend
+
 ```bash
-docker compose up --build
+AI_OUTPUT_ROOT=/tmp/sd-multimodal-platform-smoke \
+MOCK_GENERATION=true MINIMAL_MODE=true DEVICE=cpu \
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-3) 啟動前端（Vite dev server，預設 profile）：
+`AI_OUTPUT_ROOT` can be omitted on the primary workstation where `/mnt/data/training/runs/sd-multimodal-platform` is writable. The `/tmp` override keeps the public demo path reproducible on restricted laptops, CI runners, and interview machines.
+
+Open:
+
+- Health: `http://localhost:8000/api/v1/health`
+- Docs: `http://localhost:8000/api/v1/docs`
+- Outputs: `http://localhost:8000/outputs/*`
+- Assets: `http://localhost:8000/assets/*`
+
+### 3. React frontend
+
 ```bash
-docker compose --profile frontend up --build
+cd frontend/react
+npm ci
+VITE_API_BASE_URL=http://localhost:8000 npm run dev
 ```
 
-4) GPU（需要 NVIDIA Container Toolkit / Docker Desktop GPU 支援）：
+Open `http://localhost:5173`.
+
+### 4. Static portfolio demo
+
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+python -m http.server 4175 --directory portfolio-web
 ```
 
-常用連結：
-- API：`http://localhost:8000/`（Docs：`http://localhost:8000/api/v1/docs`）
-- Frontend（profile=frontend）：`http://localhost:5173/`
+Open `http://localhost:4175`.
 
-# 📁 專案資料夾架構
+## Smoke And Build Checks
 
-```
-sd-multimodal-platform/
-├── .gitignore
-├── .env.example
-├── README.md
-├── requirements.txt
-├── docker-compose.yml
-├── environment.yml           # Conda 環境配置
-│
-├── backend/                  # 後端 API 服務
-│   ├── __init__.py
-│   ├── main.py              # FastAPI 主程式
-│   ├── config/
-│   │   ├── __init__.py
-│   │   ├── settings.py      # 環境變數配置
-│   │   └── model_config.py  # 模型路徑配置
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── v1/
-│   │   │   ├── __init__.py
-│   │   │   ├── endpoints/
-│   │   │   │   ├── __init__.py
-│   │   │   │   ├── txt2img.py
-│   │   │   │   ├── img2img.py
-│   │   │   │   ├── controlnet.py
-│   │   │   │   └── models.py
-│   │   │   └── router.py
-│   │   └── dependencies.py
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── sd_pipeline.py   # SD 推理核心
-│   │   ├── model_loader.py  # 模型載入管理
-│   │   └── image_utils.py   # 圖片處理工具
-│   ├── schemas/
-│   │   ├── __init__.py
-│   │   ├── requests.py      # API 請求模型
-│   │   └── responses.py     # API 回應模型
-│   └── tests/
-│       ├── __init__.py
-│       └── test_api.py
-│
-├── frontend/                 # 前端界面
-│   ├── web/                 # Web 界面 (Vue.js/React)
-│   │   ├── package.json
-│   │   ├── src/
-│   │   │   ├── components/
-│   │   │   │   ├── ChatInterface.vue
-│   │   │   │   ├── ImageGenerator.vue
-│   │   │   │   └── ParameterPanel.vue
-│   │   │   ├── views/
-│   │   │   ├── router/
-│   │   │   ├── store/
-│   │   │   └── main.js
-│   │   └── dist/
-│   │
-│   ├── gradio_app/          # Gradio WebUI
-│   │   ├── __init__.py
-│   │   ├── app.py           # Gradio 主程式
-│   │   ├── components/
-│   │   │   ├── __init__.py
-│   │   │   ├── txt2img_tab.py
-│   │   │   ├── img2img_tab.py
-│   │   │   └── controlnet_tab.py
-│   │   └── utils.py
-│   │
-│   └── desktop/             # 桌面應用 (PyQt6)
-│       ├── __init__.py
-│       ├── main.py          # 桌面應用主程式
-│       ├── ui/
-│       │   ├── __init__.py
-│       │   ├── main_window.py
-│       │   ├── chat_widget.py
-│       │   └── generator_widget.py
-│       └── resources/
-│           ├── icons/
-│           └── styles/
-│
-├── models/                   # 模型檔案目錄
-│   ├── stable-diffusion/
-│   │   ├── sd-1.5/
-│   │   ├── sdxl/
-│   │   └── custom/
-│   ├── controlnet/
-│   ├── lora/
-│   └── vae/
-│
-├── data/                    # 資料目錄
-│   ├── images/
-│   │   ├── input/
-│   │   ├── output/
-│   │   └── temp/
-│   ├── prompts/
-│   └── logs/
-│
-├── scripts/                 # 工具腳本
-│   ├── download_models.py   # 模型下載腳本
-│   ├── setup.py            # 環境設置
-│   └── benchmark.py        # 性能測試
-│
-├── docs/                    # 文件
-│   ├── api.md
-│   ├── setup.md
-│   └── user_guide.md
-│
-└── deployment/              # 部署配置
-    ├── docker/
-    │   ├── Dockerfile.backend
-    │   ├── Dockerfile.frontend
-    │   └── nginx.conf
-    └── k8s/
-        ├── backend-deployment.yaml
-        └── frontend-deployment.yaml
+```bash
+python scripts/check_paths.py
+python -m compileall app services scripts utils
+python -m pytest tests/test_phase2_api.py tests/test_path_invariants.py tests/test_postprocess_sync_history.py --no-cov -q
+
+AI_OUTPUT_ROOT=/tmp/sd-multimodal-platform-smoke \
+MOCK_GENERATION=true MINIMAL_MODE=true DEVICE=cpu \
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+python scripts/smoke_api.py
+
+cd frontend/react
+npm ci
+npm run typecheck
+npm run build
 ```
 
-## 🐍 Conda 環境配置
+Capture demo media:
 
-### 主環境：`sd-platform`
-```yaml
-name: sd-platform
-channels:
-  - nvidia
-  - pytorch
-  - conda-forge
-  - defaults
-dependencies:
-  - python=3.10
-  # PyTorch (穩定＋廣泛相容)
-  - pytorch=2.3.*
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.1 # 由 nvidia channel 提供；取代 cudatoolkit
-  - pip
-  - pip:
-      # Core ML
-      - diffusers>=0.29.0
-      - transformers>=4.43.0
-      - accelerate>=0.31.0
-      - xformers==0.0.27.post2 # 與 torch 2.3 + cu121 相容
-      - controlnet-aux>=0.6.0
-      - safetensors>=0.4.3
-      - einops>=0.7.0
-      - huggingface_hub>=0.24.0
-
-      # API & Web
-      - fastapi>=0.111.0
-      - uvicorn[standard]>=0.30.0
-      - gradio>=4.36.0
-      - pydantic>=2.8.0
-      - python-multipart
-      - aiofiles
-
-      # Desktop UI
-      - PyQt6>=6.6.0
-      - PyQt6-tools
-
-      # Utils
-      - pillow>=10.3.0
-      - opencv-python-headless>=4.10.0.84
-      - numpy>=1.26.4
-      - scipy>=1.13.0
-
-      # Test
-      - pytest>=8.2.0
-
+```bash
+python -m http.server 4175 --directory portfolio-web
+python scripts/capture_demo_assets.py
 ```
 
-## 🔧 Git 工作流程與分支策略
+## Full Model Mode
 
-### 分支命名規範
-- `main` - 穩定發布版本
-- `develop` - 開發主分支
-- `feature/backend-api` - 後端API功能
-- `feature/gradio-ui` - Gradio界面
-- `feature/desktop-app` - 桌面應用
-- `feature/chat-interface` - 聊天界面
-- `fix/model-loading` - Bug修復
-- `docs/api-documentation` - 文件更新
+Full model mode requires local weights and sufficient GPU memory.
+
+```bash
+python scripts/install_models.py
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Optional async queue:
+
+```bash
+redis-server
+celery -A app.workers.celery_worker worker --loglevel=info --queues=generation,postprocess
+```
+
+## Deployment
+
+The public static demo is suitable for GitHub Pages because it is self-contained and does not require a backend process.
+
+```mermaid
+flowchart LR
+    Commit[Commit to main] --> Action[GitHub Actions]
+    Action --> Build[Package portfolio-web]
+    Build --> Pages[gh-pages branch]
+    Pages --> Public[justin21523.github.io/sd-multimodal-platform]
+    Public --> Portfolio[Main portfolio project page]
+```
+
+For a live backend API, use Render, Railway, Fly.io, or a Docker host. GPU-backed full model mode should run on a machine with CUDA, model weights, and mounted `/mnt/c` + `/mnt/data` storage.
+
+## Interview Demo Script
+
+1. Open the live demo and show the first viewport. The product itself is visible immediately: prompt panel, generated result, queue monitor, assets/history.
+2. Click `Run mock pipeline`. Explain that public demo mode is deterministic and GPU-free, while preserving the same UX and API concepts.
+3. Scroll to Architecture. Connect React, FastAPI routers, ModelManager, queue, outputs/assets/history.
+4. Open README diagrams. Point out degradation strategy: no Redis/model weights should not crash the service.
+5. Run local smoke:
+
+```bash
+python scripts/smoke_api.py
+```
+
+6. Show React build:
+
+```bash
+cd frontend/react && npm run typecheck && npm run build
+```
+
+## What Is Complete
+
+- FastAPI app boots in mock-safe mode.
+- Health, model list, txt2img, img2img, assets/history, postprocess status, and queue degradation are testable.
+- React + TypeScript frontend typechecks and builds.
+- Static GitHub Pages demo is interactive and can be recorded.
+- Demo screenshots and video assets are generated under `docs/demo/`.
+- README contains architecture, data flow, queue lifecycle, deployment, and demo runbook diagrams.
+
+## Current Risks And Boundaries
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Full SD/SDXL needs model weights and GPU | Public demo cannot show true diffusion output | Mock-safe mode is clearly labeled; full mode instructions remain documented |
+| Redis/Celery optional | Queue endpoints may return 503 locally | API degrades cleanly; smoke test accepts 503 for absent Redis |
+| Postprocess libraries can conflict at import time | GFPGAN/basicsr may break app loading | Optional imports fall back to mock/fallback implementation |
+| npm audit reports dependency issues | Vite dev dependencies may need future upgrade | Do not force breaking upgrades during demo stabilization; track as follow-up |
+
+## Repository Notes
+
+- Primary backend: `app/`
+- Primary frontend: `frontend/react/`
+- Public static demo: `portfolio-web/`
+- Legacy prototypes: `backend/`, `frontend/web/`, `frontend/gradio_app/`, `frontend/desktop/`
+- Large models, generated outputs, secrets, and private datasets must stay out of Git.

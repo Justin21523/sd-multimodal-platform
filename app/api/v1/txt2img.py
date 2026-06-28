@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 async def get_model_manager_dependency():
     """Dependency to get initialized model manager."""
     manager = get_model_manager()
+    if settings.MOCK_GENERATION and not manager.is_initialized:
+        await manager.initialize(settings.PRIMARY_MODEL)
     if not manager.is_initialized:
         raise HTTPException(
             status_code=503,
