@@ -34,16 +34,41 @@ Demo video: [`docs/demo/demo/demo-walkthrough.webm`](docs/demo/demo/demo-walkthr
 
 ```mermaid
 flowchart LR
-    A[Prompt / source image] --> B[React workbench]
-    B --> C[FastAPI v1 routers]
-    C --> D{Run mode}
-    D -->|Mock-safe| E[Deterministic PIL renderer]
-    D -->|Full GPU| F[Diffusers SD / SDXL pipelines]
-    F --> G[Optional ControlNet / postprocess]
-    E --> H[Output image + metadata]
+    A["Prompt or source image"] --> B["React workbench"]
+    B --> C["FastAPI v1 routers"]
+    C --> D{"Run mode"}
+    D -->|"Mock safe"| E["Deterministic PIL renderer"]
+    D -->|"Full GPU"| F["Diffusers SD and SDXL pipelines"]
+    F --> G["Optional ControlNet and postprocess"]
+    E --> H["Output image and metadata"]
     G --> H
-    H --> I[Outputs / Assets / History]
-    I --> J[Rerun, import, inspect]
+    H --> I["Outputs, assets, and history"]
+    I --> J["Rerun, import, inspect"]
+```
+
+## System Context
+
+```mermaid
+flowchart TB
+    Reviewer["Interviewer or reviewer"]
+    Demo["GitHub Pages static demo"]
+    LocalUI["Local React workbench"]
+    API["FastAPI service"]
+    Mock["Mock-safe renderer"]
+    GPU["Optional GPU model runtime"]
+    Storage["Outputs, assets, logs, and history"]
+    Portfolio["Main portfolio case study"]
+
+    Reviewer --> Demo
+    Reviewer --> Portfolio
+    Reviewer --> LocalUI
+    Demo --> Portfolio
+    LocalUI --> API
+    API --> Mock
+    API --> GPU
+    Mock --> Storage
+    GPU --> Storage
+    Storage --> Portfolio
 ```
 
 ## Architecture
@@ -56,10 +81,10 @@ flowchart TB
     end
 
     subgraph API["FastAPI Service"]
-      MW[Logging / Auth / Rate Limit / CORS]
-      R1[txt2img / img2img / inpaint]
-      R2[upscale / face_restore]
-      R3[assets / history / models / queue / health]
+      MW["Logging, auth, rate limit, and CORS"]
+      R1["txt2img, img2img, and inpaint"]
+      R2["upscale and face restore"]
+      R3["assets, history, models, queue, and health"]
     end
 
     subgraph Services["Service Layer"]
@@ -71,11 +96,11 @@ flowchart TB
     end
 
     subgraph Runtime["Runtime / Storage"]
-      Models[/mnt/c/ai_models]
-      Cache[/mnt/c/ai_cache]
-      Outputs[/mnt/data/.../outputs]
-      Assets[/mnt/data/.../assets]
-      Logs[/mnt/data/.../logs]
+      Models["Models directory: /mnt/c/ai_models"]
+      Cache["Cache directory: /mnt/c/ai_cache"]
+      Outputs["Generated outputs directory"]
+      Assets["Uploaded assets directory"]
+      Logs["Logs and history directory"]
       Redis[(Redis optional)]
       Celery[Celery workers optional]
     end
@@ -97,6 +122,58 @@ flowchart TB
     HS --> Logs
     QM --> Redis
     Redis --> Celery
+```
+
+## Technical Stack Map
+
+```mermaid
+flowchart LR
+    subgraph Frontend["Frontend"]
+      React["React"]
+      TypeScript["TypeScript"]
+      Vite["Vite"]
+      StaticDemo["Static portfolio-web demo"]
+    end
+
+    subgraph Backend["Backend"]
+      FastAPI["FastAPI"]
+      Pydantic["Pydantic schemas"]
+      Middleware["Request logging, auth, rate limit, CORS"]
+    end
+
+    subgraph AI["AI and image layer"]
+      Diffusers["Diffusers pipelines"]
+      Pillow["Pillow mock renderer"]
+      Postprocess["Real-ESRGAN, GFPGAN, CodeFormer adapters"]
+    end
+
+    subgraph Async["Async layer"]
+      Redis["Redis"]
+      Celery["Celery workers"]
+      Queue["Queue manager"]
+    end
+
+    subgraph Verification["Verification"]
+      Pytest["pytest"]
+      Smoke["HTTP smoke script"]
+      Build["Vite build and typecheck"]
+      Playwright["Playwright screenshot and video capture"]
+    end
+
+    React --> FastAPI
+    Vite --> StaticDemo
+    FastAPI --> Pydantic
+    FastAPI --> Middleware
+    FastAPI --> Diffusers
+    FastAPI --> Pillow
+    FastAPI --> Postprocess
+    FastAPI --> Queue
+    Queue --> Redis
+    Redis --> Celery
+    Pytest --> FastAPI
+    Smoke --> FastAPI
+    Build --> React
+    Playwright --> StaticDemo
 ```
 
 ## API Request Sequence
@@ -143,14 +220,39 @@ stateDiagram-v2
 ```mermaid
 flowchart LR
     Root[sd-multimodal-platform]
-    Root --> App[app/: FastAPI entrypoint, routers, middleware, schemas]
-    Root --> Services[services/: generation, model registry, queue, postprocess, assets/history]
-    Root --> Frontend[frontend/react/: preferred React UI]
-    Root --> Portfolio[portfolio-web/: static GitHub Pages demo]
-    Root --> Scripts[scripts/: smoke checks, setup, demo asset capture]
-    Root --> Tests[tests/: pytest suite]
-    Root --> Docs[docs/: guides and generated demo media]
-    Root --> Legacy[frontend/gradio_app, frontend/desktop, frontend/web, backend: legacy prototypes]
+    Root --> App["app: FastAPI entrypoint, routers, middleware, schemas"]
+    Root --> Services["services: generation, model registry, queue, postprocess, assets and history"]
+    Root --> Frontend["frontend/react: preferred React UI"]
+    Root --> Portfolio["portfolio-web: static GitHub Pages demo"]
+    Root --> Scripts["scripts: smoke checks, setup, demo asset capture"]
+    Root --> Tests["tests: pytest suite"]
+    Root --> Docs["docs: guides and generated demo media"]
+    Root --> Legacy["legacy prototypes: gradio, desktop, web, backend"]
+```
+
+## Demo Evidence Flow
+
+```mermaid
+flowchart TB
+    StaticPage["portfolio-web interactive demo"]
+    Capture["scripts/capture_demo_assets.py"]
+    Screens["Desktop and mobile screenshots"]
+    Video["WebM walkthrough video"]
+    Readme["README demo section"]
+    Pages["GitHub Pages public demo"]
+    PortfolioMedia["Main portfolio media assets"]
+    CaseStudy["Portfolio project page"]
+
+    StaticPage --> Capture
+    Capture --> Screens
+    Capture --> Video
+    Screens --> Readme
+    Video --> Readme
+    Screens --> Pages
+    Video --> Pages
+    Screens --> PortfolioMedia
+    Video --> PortfolioMedia
+    PortfolioMedia --> CaseStudy
 ```
 
 ## Data And Storage Layout
@@ -167,14 +269,14 @@ This repo follows `~/Desktop/data_model_structure.md`.
 
 ```mermaid
 flowchart TB
-    Request[API request] --> Output[Generated output file]
-    Request --> Metadata[Metadata JSON]
-    Upload[User upload] --> Asset[Asset file + thumbnail]
-    Output --> History[History JSON record]
+    Request["API request"] --> Output["Generated output file"]
+    Request --> Metadata["Metadata JSON"]
+    Upload["User upload"] --> Asset["Asset file and thumbnail"]
+    Output --> History["History JSON record"]
     Metadata --> History
     Asset --> History
-    Output --> Public[/outputs/* URL]
-    Asset --> PublicAssets[/assets/* URL]
+    Output --> PublicOutputs["Public output URL"]
+    Asset --> PublicAssets["Public asset URL"]
 ```
 
 ## Local Quick Start
@@ -274,11 +376,11 @@ The public static demo is suitable for GitHub Pages because it is self-contained
 
 ```mermaid
 flowchart LR
-    Commit[Commit to main] --> Action[GitHub Actions]
-    Action --> Build[Package portfolio-web]
-    Build --> Pages[gh-pages branch]
-    Pages --> Public[justin21523.github.io/sd-multimodal-platform]
-    Public --> Portfolio[Main portfolio project page]
+    Commit["Commit to main"] --> Action["GitHub Actions"]
+    Action --> Build["Package portfolio-web"]
+    Build --> Pages["gh-pages branch"]
+    Pages --> PublicDemo["Public demo URL"]
+    PublicDemo --> PortfolioPage["Main portfolio project page"]
 ```
 
 For a live backend API, use Render, Railway, Fly.io, or a Docker host. GPU-backed full model mode should run on a machine with CUDA, model weights, and mounted `/mnt/c` + `/mnt/data` storage.
